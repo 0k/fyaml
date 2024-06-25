@@ -1,0 +1,6 @@
+NAME="fyaml"
+DESCRIPTION="Safe Rust bindings for libfyaml YAML parser"
+EMAIL="valentin.lab@kalysto.org"
+AUTHOR="Valentin LAB"
+AUTHOR_EMAIL="$AUTHOR <$EMAIL>"
+FILES="Cargo.toml"

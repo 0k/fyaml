@@ -1,0 +1,290 @@
+* fyaml
+
+A safe Rust wrapper around the ~libfyaml~ C library for parsing and
+manipulating YAML documents.
+
+** Overview
+
+~fyaml~ provides an idiomatic Rust interface to the high-performance
+=libfyaml= YAML parsing library. It supports DOM-style navigation,
+node type introspection, multi-document parsing, and a serde-compatible
+~Value~ type for easy YAML manipulation.
+
+** Status
+
+*Early development* - This library is functional but has not yet been
+widely used or audited. The API may change, and edge cases may exist.
+If you need a mature, battle-tested YAML library, consider ~serde_yml~
+or ~serde-yaml-ng~ instead.
+
+** Why libfyaml?
+
+~fyaml~ is built on [[https://github.com/pantoniou/libfyaml][libfyaml]], a modern C library that offers
+several advantages over the traditional =libyaml=:
+
+- *Full YAML 1.2 compliance* with YAML 1.3 preparation
+- *Zero-copy architecture* for efficient large document handling
+- *No artificial limits* (libyaml has a 1024-char implicit key limit)
+- *Up to 24x faster* on large files in streaming mode
+- *Rich manipulation APIs* including YPATH expressions for path queries
+- *MIT licensed* (as of v0.9.1)
+
+This makes ~fyaml~ suitable for use cases requiring DOM manipulation,
+YAML transformation tools, or configuration inspection utilities where
+path-based queries are convenient.
+
+** Features
+
+- Parse YAML strings into document objects
+- Navigate nodes using path-based queries (e.g., ~/foo/bar~, ~/list/0~)
+- Support for all YAML node types: scalars, sequences, and mappings
+- Iterate over mapping key-value pairs and sequence items
+- Convert nodes back to YAML strings
+- Multi-document stream parsing
+- Read YAML from stdin
+- *~Value~ type*: Pure Rust enum with serde support
+  - Serialize/deserialize with any serde-compatible format (JSON, TOML, etc.)
+  - Emit YAML using libfyaml for standards-compliant output
+  - Convenient indexing: ~value["key"]~, ~value[0]~
+
+** Installation
+
+Add to your ~Cargo.toml~:
+
+#+begin_src toml
+[dependencies]
+fyaml = { path = "path/to/fyaml" }
+#+end_src
+
+Requires ~libfyaml-sys~ as a sibling dependency.
+
+** Usage
+
+*** Working with Value (recommended)
+
+The ~Value~ type provides a convenient, serde-compatible way to work with YAML:
+
+#+begin_src rust
+use fyaml::Value;
+
+// Parse YAML
+let value: Value = "name: Alice\nage: 30".parse().unwrap();
+
+// Access values with indexing
+assert_eq!(value["name"].as_str(), Some("Alice"));
+assert_eq!(value["age"].as_i64(), Some(30));
+
+// Emit back to YAML
+let yaml = value.to_yaml_string().unwrap();
+#+end_src
+
+*** Serde integration
+
+~Value~ works with any serde-compatible format:
+
+#+begin_src rust
+use fyaml::Value;
+
+let value: Value = "key: value".parse().unwrap();
+
+// Convert to JSON
+let json = serde_json::to_string(&value).unwrap();
+assert_eq!(json, r#"{"key":"value"}"#);
+
+// Parse from JSON
+let from_json: Value = serde_json::from_str(&json).unwrap();
+#+end_src
+
+*** Low-level Node API
+
+For more control, use the ~Node~ API directly:
+
+*** Parsing a YAML string
+
+#+begin_src rust
+use fyaml::node::Node;
+use std::str::FromStr;
+
+let yaml = "foo: bar";
+let root = Node::from_str(yaml).unwrap();
+let node = root.node_by_path("/foo").unwrap();
+assert_eq!(node.to_string(), "bar");
+#+end_src
+
+*** Navigating nested structures
+
+#+begin_src rust
+use fyaml::node::Node;
+use std::str::FromStr;
+
+let yaml = r#"
+database:
+  host: localhost
+  port: 5432
+  users:
+    - admin
+    - guest
+"#;
+
+let root = Node::from_str(yaml).unwrap();
+
+// Access nested mapping
+let host = root.node_by_path("/database/host").unwrap();
+assert_eq!(host.to_raw_string(), "localhost");
+
+// Access sequence item by index
+let first_user = root.node_by_path("/database/users/0").unwrap();
+assert_eq!(first_user.to_raw_string(), "admin");
+#+end_src
+
+*** Iterating over mappings
+
+#+begin_src rust
+use fyaml::node::Node;
+use std::str::FromStr;
+
+let yaml = "a: 1\nb: 2\nc: 3";
+let root = Node::from_str(yaml).unwrap();
+
+for (key, value) in root.map_iter() {
+    println!("{}: {}", key.to_raw_string(), value.to_raw_string());
+}
+#+end_src
+
+*** Iterating over sequences
+
+#+begin_src rust
+use fyaml::node::Node;
+use std::str::FromStr;
+
+let yaml = "- apple\n- banana\n- cherry";
+let root = Node::from_str(yaml).unwrap();
+
+for item in root.seq_iter() {
+    println!("{}", item.to_raw_string());
+}
+#+end_src
+
+*** Parsing multiple documents
+
+#+begin_src rust
+use fyaml::document::{FyParser, Parse};
+
+let yaml = "---\ndoc1: value1\n---\ndoc2: value2";
+let parser = FyParser::new(yaml);
+
+for doc in parser.doc_iter() {
+    println!("{}", doc.to_string());
+}
+#+end_src
+
+*** Checking node types
+
+#+begin_src rust
+use fyaml::node::{Node, NodeType};
+use std::str::FromStr;
+
+let yaml = "key: value";
+let root = Node::from_str(yaml).unwrap();
+
+assert!(root.is_mapping());
+assert_eq!(root.get_type(), NodeType::Mapping);
+
+let value = root.node_by_path("/key").unwrap();
+assert!(value.is_scalar());
+#+end_src
+
+** API Reference
+
+*** Value Types
+
+- ~Value~ - Pure Rust enum representing any YAML value (recommended)
+- ~Number~ - Numeric value: ~Int(i64)~, ~UInt(u64)~, ~Float(f64)~
+- ~TaggedValue~ - Value with an associated YAML tag
+
+*** Value Methods
+
+| Method             | Description                              |
+|--------------------+------------------------------------------|
+| ~parse()~          | Parse YAML string into Value             |
+| ~to_yaml_string()~ | Emit as YAML string via libfyaml         |
+| ~is_null()~        | Check if value is null                   |
+| ~is_bool()~        | Check if value is boolean                |
+| ~is_number()~      | Check if value is numeric                |
+| ~is_string()~      | Check if value is a string               |
+| ~is_sequence()~    | Check if value is a sequence             |
+| ~is_mapping()~     | Check if value is a mapping              |
+| ~as_str()~         | Get as ~&str~ if string                  |
+| ~as_i64()~         | Get as ~i64~ if numeric                  |
+| ~as_f64()~         | Get as ~f64~ if numeric                  |
+| ~as_bool()~        | Get as ~bool~ if boolean                 |
+| ~as_sequence()~    | Get as ~&[Value]~ if sequence            |
+| ~as_mapping()~     | Get as ~&IndexMap~ if mapping            |
+| ~get()~            | Get value by key from mapping            |
+| ~[key]~ / ~[idx]~  | Index into mapping or sequence           |
+
+*** Node Types (low-level API)
+
+- ~Node~ - Safe wrapper around YAML nodes
+- ~Document~ - Safe wrapper around YAML documents
+- ~FyParser~ - YAML parser (supports strings and stdin)
+- ~NodeType~ - Enum: ~Scalar~, ~Sequence~, ~Mapping~
+- ~MappingIterator~ - Iterator over mapping key-value pairs
+- ~SequenceIterator~ - Iterator over sequence items
+
+*** Node Methods
+
+| Method            | Description                              |
+|-------------------+------------------------------------------|
+| ~node_by_path()~  | Navigate to node by path                 |
+| ~get_type()~      | Get the node type                        |
+| ~is_scalar()~     | Check if node is a scalar                |
+| ~is_mapping()~    | Check if node is a mapping               |
+| ~is_sequence()~   | Check if node is a sequence              |
+| ~to_raw_string()~ | Get raw scalar value                     |
+| ~to_string()~     | Get YAML string representation           |
+| ~get_tag()~       | Get optional YAML tag                    |
+| ~seq_len()~       | Get sequence length                      |
+| ~map_len()~       | Get mapping length                       |
+| ~map_iter()~      | Iterate over mapping entries             |
+| ~seq_iter()~      | Iterate over sequence items              |
+
+** Dependencies
+
+- ~libc~ - C library bindings
+- ~libfyaml-sys~ - FFI bindings to libfyaml
+- ~log~ - Logging framework
+- ~serde~ - Serialization framework
+- ~indexmap~ - Order-preserving map for YAML mappings
+
+** Other Rust YAML Libraries
+
+| Library | Engine | Serde | Status |
+|---------+--------+-------+--------|
+| [[https://github.com/dtolnay/serde-yaml][serde_yaml]] | [[https://github.com/dtolnay/unsafe-libyaml][unsafe-libyaml]] (libyaml transpiled to Rust) | Yes | Deprecated (2024-03) |
+| [[https://github.com/sebastienrousseau/serde_yml][serde_yml]] | [[https://github.com/dtolnay/unsafe-libyaml][unsafe-libyaml]] | Yes | Maintained (fork of serde_yaml) |
+| [[https://github.com/acatton/serde-yaml-ng][serde-yaml-ng]] | [[https://github.com/dtolnay/unsafe-libyaml][unsafe-libyaml]] | Yes | Active (migrating to libyaml-safer) |
+| [[https://github.com/saphyr-rs/saphyr][saphyr]] | Pure Rust (fork of yaml-rust) | Soon | Active |
+| [[https://github.com/Ethiraric/yaml-rust2][yaml-rust2]] | Pure Rust (fork of yaml-rust) | No | Active (high MSRV) |
+| [[https://github.com/chyh1990/yaml-rust][yaml-rust]] | Pure Rust | No | Unmaintained |
+| fyaml | [[https://github.com/pantoniou/libfyaml][libfyaml]] (C library via FFI) | Yes | Development |
+
+*** Choosing a Library
+
+- *For serde integration*: ~fyaml~ provides a serde-compatible ~Value~
+  type with libfyaml-powered parsing and emission. Alternatives include
+  ~serde_yml~ or ~serde-yaml-ng~ (based on unsafe-libyaml).
+
+- *For pure Rust*: Use ~saphyr~ or ~yaml-rust2~ (no C dependencies,
+  easier to audit).
+
+- *For DOM manipulation and path queries*: ~fyaml~ provides convenient
+  path-based navigation (~/foo/0/bar~) via libfyaml's YPATH support,
+  plus a ~Value~ type for programmatic manipulation.
+
+- *For maximum performance on large files*: ~fyaml~ benefits from
+  libfyaml's zero-copy architecture and streaming optimizations.
+
+** License
+
+See the project repository for license information.

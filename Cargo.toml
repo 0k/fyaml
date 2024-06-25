@@ -1,0 +1,24 @@
+[package]
+name = "fyaml"
+version = "%%version%%"
+edition = "2021"
+authors = ["Valentin Lab <valentin.lab@kalysto.org>"]
+description = "Safe Rust bindings for libfyaml YAML parser with DOM navigation, path queries, and serde-compatible Value type"
+license = "MIT"
+repository = "https://github.com/0k/fyaml"
+documentation = "https://docs.rs/fyaml"
+readme = "README.md"
+keywords = ["yaml", "parser", "libfyaml", "serde", "dom"]
+categories = ["parsing", "encoding"]
+rust-version = "1.63"
+
+[dependencies]
+libc = "0.2"
+log = "0.4"
+fyaml-sys = "0.1"
+serde = "1.0"
+indexmap = { version = "2.0", features = ["serde"] }
+
+[dev-dependencies]
+indoc = "2"
+serde_json = "1.0"
