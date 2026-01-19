@@ -4,6 +4,7 @@
 
 use fyaml::document::Document;
 use fyaml::node::{Node, NodeType};
+use std::os::unix::io::AsRawFd;
 use std::rc::Rc;
 use std::str::FromStr;
 
@@ -29,14 +30,23 @@ fn parse_document_root_node_is_mapping() {
 }
 
 #[test]
-fn parse_empty_document() {
-    // Empty document should parse but have no root node
-    let yaml = "";
-    let result = yaml.parse::<Document>();
-    // libfyaml may return error or empty doc depending on version
-    if let Ok(doc) = result {
-        assert!(doc.root_node().is_none());
+fn parse_empty_document_returns_error() {
+    // libfyaml rejects empty input and prints "[ERR]: fy_parse_load_document() failed"
+    // directly to stderr (fd 2). Since this is a C library, Rust's test output capture
+    // doesn't intercept it, causing confusing error messages in test output.
+    // We temporarily redirect stderr to /dev/null during this test.
+    let devnull = std::fs::File::open("/dev/null").unwrap();
+    let old_stderr = unsafe { libc::dup(2) };
+    unsafe { libc::dup2(devnull.as_raw_fd(), 2) };
+
+    let result = "".parse::<Document>();
+
+    unsafe {
+        libc::dup2(old_stderr, 2);
+        libc::close(old_stderr);
     }
+
+    assert!(result.is_err());
 }
 
 #[test]
