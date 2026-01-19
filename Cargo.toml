@@ -11,6 +11,7 @@ readme = "README.md"
 keywords = ["yaml", "parser", "libfyaml", "serde", "dom"]
 categories = ["parsing", "encoding"]
 rust-version = "1.63"
+exclude = ["README.org", ".package.d/", "autogen.sh"]
 
 [dependencies]
 libc = "0.2"
