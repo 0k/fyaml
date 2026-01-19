@@ -53,10 +53,8 @@ Add to your ~Cargo.toml~:
 
 #+begin_src toml
 [dependencies]
-fyaml = { path = "path/to/fyaml" }
+fyaml = "0.1"
 #+end_src
-
-Requires ~libfyaml-sys~ as a sibling dependency.
 
 ** Usage
 
@@ -252,7 +250,7 @@ assert!(value.is_scalar());
 ** Dependencies
 
 - ~libc~ - C library bindings
-- ~libfyaml-sys~ - FFI bindings to libfyaml
+- ~fyaml-sys~ - FFI bindings to libfyaml
 - ~log~ - Logging framework
 - ~serde~ - Serialization framework
 - ~indexmap~ - Order-preserving map for YAML mappings
