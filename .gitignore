@@ -1,1 +1,4 @@
 /target
+/README.md
+/.pkg
+/Cargo.lock
