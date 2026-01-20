@@ -176,6 +176,34 @@ for doc in parser.doc_iter() {
 }
 #+end_src
 
+*** Reading from stdin
+
+For CLI tools that read YAML from stdin:
+
+#+begin_src rust
+use fyaml::document::{FyParser, Parse};
+
+// Default: line-buffered mode for interactive/streaming use
+let parser = FyParser::from_stdin().unwrap();
+
+for doc in parser.doc_iter() {
+    println!("{}", doc.root().to_string());
+}
+#+end_src
+
+For batch processing where efficiency matters more than interactivity:
+
+#+begin_src rust
+use fyaml::document::{FyParser, Parse};
+
+// Block-buffered mode: more efficient for large inputs
+let parser = FyParser::from_stdin_with_line_buffer(false).unwrap();
+
+for doc in parser.doc_iter() {
+    // Process each document
+}
+#+end_src
+
 *** Checking node types
 
 #+begin_src rust
@@ -246,6 +274,15 @@ assert!(value.is_scalar());
 | ~map_len()~       | Get mapping length                       |
 | ~map_iter()~      | Iterate over mapping entries             |
 | ~seq_iter()~      | Iterate over sequence items              |
+
+*** FyParser Methods
+
+| Method                           | Description                              |
+|----------------------------------+------------------------------------------|
+| ~new(yaml)~                      | Create parser from YAML string           |
+| ~from_stdin()~                   | Create parser reading from stdin (line-buffered) |
+| ~from_stdin_with_line_buffer(b)~ | Create parser from stdin with configurable buffering |
+| ~doc_iter()~                     | Iterate over documents in stream         |
 
 ** Dependencies
 

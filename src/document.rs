@@ -47,19 +47,32 @@ impl FyParser {
     ///
     /// The stdin stream is set to line-buffered mode for interactive use.
     pub fn from_stdin() -> Result<Rc<Self>, String> {
-        log::trace!("open stdin");
+        Self::from_stdin_with_line_buffer(true)
+    }
+
+    /// Creates a parser configured to read from stdin with configurable buffering.
+    ///
+    /// When `line_buffered` is true, stdin is set to line-buffered mode which
+    /// allows processing documents as soon as each line arrives (useful for
+    /// streaming/interactive use).
+    ///
+    /// When `line_buffered` is false, stdin uses default (block) buffering which
+    /// waits for larger chunks of data before processing (more efficient for
+    /// batch processing).
+    pub fn from_stdin_with_line_buffer(line_buffered: bool) -> Result<Rc<Self>, String> {
+        log::trace!("open stdin (line_buffered={})", line_buffered);
         let parser = FyParser::new()?;
         let stdin = std::io::stdin();
         let fd = stdin.as_raw_fd();
-        // Note: We don't close the FILE* as it wraps stdin which should remain open
-        let fp = unsafe {
-            fdopen(fd, "r".as_ptr() as *const i8) // Convert to *mut FILE
-        };
-        // Set the buffering mode to line-buffered
-        let setvbuf_result = unsafe { setvbuf(fp, std::ptr::null_mut(), _IOLBF, 0) };
-        if setvbuf_result != 0 {
-            return Err("Failed to set line-buffered mode".to_string());
+        let fp = unsafe { fdopen(fd, "r".as_ptr() as *const i8) };
+
+        if line_buffered {
+            let setvbuf_result = unsafe { setvbuf(fp, std::ptr::null_mut(), _IOLBF, 0) };
+            if setvbuf_result != 0 {
+                return Err("Failed to set line-buffered mode".to_string());
+            }
         }
+
         let ret =
             unsafe { fy_parser_set_input_fp(parser.parser_ptr, "stdin".as_ptr() as *const i8, fp) };
         if ret != 0 {
