@@ -24,8 +24,8 @@ several advantages over the traditional =libyaml=:
 
 - *Full YAML 1.2 compliance* with YAML 1.3 preparation
 - *Zero-copy architecture* for efficient large document handling
-- *No artificial limits* (libyaml has a 1024-char implicit key limit)
-- *Up to 24x faster* on large files in streaming mode
+- *No artificial limits* (libyaml has a [[https://github.com/yaml/libyaml/blob/master/src/scanner.c#L1065-L1074][1024-char implicit key limit]])
+- *[[https://github.com/pantoniou/libfyaml/blob/master/CHANGELOG.md#091---2025-12-28][Up to 24x faster]]* on large files in streaming mode (vs document mode)
 - *Rich manipulation APIs* including YPATH expressions for path queries
 - *MIT licensed* (as of v0.9.1)
 
