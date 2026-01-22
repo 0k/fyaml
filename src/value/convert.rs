@@ -1,53 +1,63 @@
-//! Conversions between Node and Value types.
+//! Conversions between NodeRef and Value types.
 
-use super::{Number, TaggedValue, Value};
-use crate::node::{Node, NodeType};
+use super::{TaggedValue, Value};
+use crate::error::Result;
+use crate::node::NodeType;
+use crate::scalar_parse;
+use crate::NodeRef;
 use indexmap::IndexMap;
 
 impl Value {
-    /// Creates a Value from a Node.
+    /// Creates a Value from a NodeRef.
     ///
-    /// This walks the Node tree recursively and converts it to a pure Rust Value.
+    /// This walks the NodeRef tree recursively and converts it to a pure Rust Value.
+    /// Uses capacity pre-allocation for sequences and mappings based on their known lengths.
     /// Scalar type inference (null, bool, number, string) is performed during conversion.
     ///
     /// # Example
     ///
     /// ```
-    /// use fyaml::node::Node;
-    /// use fyaml::value::Value;
-    /// use std::str::FromStr;
+    /// use fyaml::Document;
+    /// use fyaml::Value;
     ///
-    /// let node = Node::from_str("foo: 42").unwrap();
-    /// let value = Value::from_node(&node).unwrap();
+    /// let doc = Document::parse_str("foo: 42").unwrap();
+    /// let root = doc.root().unwrap();
+    /// let value = Value::from_node_ref(root).unwrap();
     /// assert!(value.is_mapping());
     /// ```
-    pub fn from_node(node: &Node) -> Result<Value, String> {
-        Self::from_node_inner(node)
+    pub fn from_node_ref(node: NodeRef<'_>) -> Result<Value> {
+        Self::from_node_ref_inner(node)
     }
 
-    fn from_node_inner(node: &Node) -> Result<Value, String> {
-        // Check for tag first
-        let tag = node.get_tag()?;
+    fn from_node_ref_inner(node: NodeRef<'_>) -> Result<Value> {
+        let tag = node.tag_str()?;
 
-        let value = match node.get_type() {
+        let value = match node.kind() {
             NodeType::Scalar => {
-                let raw = node.to_raw_string()?;
-                infer_scalar_type(&raw)
+                let raw = node.scalar_str()?;
+                // Non-plain scalars (quoted, literal, folded) should not be type-inferred
+                if node.is_non_plain() {
+                    Value::String(raw.to_string())
+                } else {
+                    infer_scalar_type(raw)
+                }
             }
             NodeType::Sequence => {
-                let mut items = Vec::new();
-                for item_result in node.seq_iter() {
-                    let item = item_result?;
-                    items.push(Self::from_node_inner(&item)?);
+                // Pre-allocate with known capacity
+                let len = node.seq_len().unwrap_or(0);
+                let mut items = Vec::with_capacity(len);
+                for item in node.seq_iter() {
+                    items.push(Self::from_node_ref_inner(item)?);
                 }
                 Value::Sequence(items)
             }
             NodeType::Mapping => {
-                let mut map = IndexMap::new();
-                for pair_result in node.map_iter() {
-                    let (key_node, value_node) = pair_result?;
-                    let key = Self::from_node_inner(&key_node)?;
-                    let value = Self::from_node_inner(&value_node)?;
+                // Pre-allocate with known capacity
+                let len = node.map_len().unwrap_or(0);
+                let mut map = IndexMap::with_capacity(len);
+                for (key_node, value_node) in node.map_iter() {
+                    let key = Self::from_node_ref_inner(key_node)?;
+                    let value = Self::from_node_ref_inner(value_node)?;
                     map.insert(key, value);
                 }
                 Value::Mapping(map)
@@ -56,7 +66,10 @@ impl Value {
 
         // Wrap with tag if present
         match tag {
-            Some(t) => Ok(Value::Tagged(Box::new(TaggedValue { tag: t, value }))),
+            Some(t) => Ok(Value::Tagged(Box::new(TaggedValue {
+                tag: t.to_string(),
+                value,
+            }))),
             None => Ok(value),
         }
     }
@@ -68,22 +81,17 @@ impl Value {
 /// This follows YAML 1.1/1.2 core schema conventions.
 fn infer_scalar_type(s: &str) -> Value {
     // Check for null
-    if is_null(s) {
+    if scalar_parse::is_null(s) {
         return Value::Null;
     }
 
     // Check for boolean
-    if let Some(b) = parse_bool(s) {
+    if let Some(b) = scalar_parse::parse_bool(s) {
         return Value::Bool(b);
     }
 
-    // Check for integer (including hex, octal, binary)
-    if let Some(n) = parse_integer(s) {
-        return Value::Number(n);
-    }
-
-    // Check for float (including special values)
-    if let Some(n) = parse_float(s) {
+    // Check for number (int or float)
+    if let Some(n) = scalar_parse::parse_number(s) {
         return Value::Number(n);
     }
 
@@ -91,84 +99,11 @@ fn infer_scalar_type(s: &str) -> Value {
     Value::String(s.to_string())
 }
 
-fn is_null(s: &str) -> bool {
-    matches!(
-        s.to_lowercase().as_str(),
-        "" | "~" | "null" | "Null" | "NULL"
-    ) || s == "~"
-}
-
-fn parse_bool(s: &str) -> Option<bool> {
-    match s {
-        "true" | "True" | "TRUE" | "yes" | "Yes" | "YES" | "on" | "On" | "ON" => Some(true),
-        "false" | "False" | "FALSE" | "no" | "No" | "NO" | "off" | "Off" | "OFF" => Some(false),
-        _ => None,
-    }
-}
-
-fn parse_integer(s: &str) -> Option<Number> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-
-    // Handle sign
-    let (neg, s) = if let Some(rest) = s.strip_prefix('-') {
-        (true, rest)
-    } else if let Some(rest) = s.strip_prefix('+') {
-        (false, rest)
-    } else {
-        (false, s)
-    };
-
-    // Try different bases
-    let result = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        i64::from_str_radix(hex, 16).ok()
-    } else if let Some(oct) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
-        i64::from_str_radix(oct, 8).ok()
-    } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
-        i64::from_str_radix(bin, 2).ok()
-    } else {
-        s.parse::<i64>().ok()
-    };
-
-    result.map(|n| {
-        let n = if neg { -n } else { n };
-        if n >= 0 {
-            Number::UInt(n as u64)
-        } else {
-            Number::Int(n)
-        }
-    })
-}
-
-fn parse_float(s: &str) -> Option<Number> {
-    let s_lower = s.to_lowercase();
-
-    // Special float values
-    match s_lower.as_str() {
-        ".inf" | "+.inf" => return Some(Number::Float(f64::INFINITY)),
-        "-.inf" => return Some(Number::Float(f64::NEG_INFINITY)),
-        ".nan" => return Some(Number::Float(f64::NAN)),
-        _ => {}
-    }
-
-    // Regular float
-    // Must contain a decimal point or exponent to be considered a float
-    if s.contains('.') || s.to_lowercase().contains('e') {
-        if let Ok(f) = s.parse::<f64>() {
-            return Some(Number::Float(f));
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::Node;
-    use std::str::FromStr;
+    use crate::value::Number;
+    use crate::Document;
 
     #[test]
     fn test_infer_null() {
@@ -198,10 +133,7 @@ mod tests {
 
     #[test]
     fn test_infer_float() {
-        assert_eq!(
-            infer_scalar_type("3.14"),
-            Value::Number(Number::Float(3.14))
-        );
+        assert_eq!(infer_scalar_type("2.5"), Value::Number(Number::Float(2.5)));
         assert_eq!(
             infer_scalar_type("1.0e10"),
             Value::Number(Number::Float(1.0e10))
@@ -234,27 +166,62 @@ mod tests {
     }
 
     #[test]
-    fn test_from_node_scalar() {
-        let node = Node::from_str("42").unwrap();
-        let value = Value::from_node(&node).unwrap();
+    fn test_from_node_ref_scalar() {
+        let doc = Document::parse_str("42").unwrap();
+        let root = doc.root().unwrap();
+        let value = Value::from_node_ref(root).unwrap();
         assert_eq!(value, Value::Number(Number::UInt(42)));
     }
 
     #[test]
-    fn test_from_node_sequence() {
-        let node = Node::from_str("[1, 2, 3]").unwrap();
-        let value = Value::from_node(&node).unwrap();
+    fn test_from_node_ref_sequence() {
+        let doc = Document::parse_str("[1, 2, 3]").unwrap();
+        let root = doc.root().unwrap();
+        let value = Value::from_node_ref(root).unwrap();
         assert!(value.is_sequence());
         let seq = value.as_sequence().unwrap();
         assert_eq!(seq.len(), 3);
     }
 
     #[test]
-    fn test_from_node_mapping() {
-        let node = Node::from_str("foo: bar").unwrap();
-        let value = Value::from_node(&node).unwrap();
+    fn test_from_node_ref_mapping() {
+        let doc = Document::parse_str("foo: bar").unwrap();
+        let root = doc.root().unwrap();
+        let value = Value::from_node_ref(root).unwrap();
         assert!(value.is_mapping());
         assert_eq!(value["foo"], Value::String("bar".into()));
+    }
+
+    #[test]
+    fn test_from_node_ref_nested() {
+        let doc = Document::parse_str("users:\n  - name: Alice\n  - name: Bob").unwrap();
+        let root = doc.root().unwrap();
+        let value = Value::from_node_ref(root).unwrap();
+        assert!(value.is_mapping());
+        let users = value["users"].as_sequence().unwrap();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0]["name"], Value::String("Alice".into()));
+        assert_eq!(users[1]["name"], Value::String("Bob".into()));
+    }
+
+    #[test]
+    fn test_from_node_ref_quoted_string() {
+        let doc = Document::parse_str("quoted: 'true'").unwrap();
+        let root = doc.root().unwrap();
+        let value = Value::from_node_ref(root).unwrap();
+        // Quoted 'true' should be a string, not a bool
+        assert_eq!(value["quoted"], Value::String("true".into()));
+    }
+
+    #[test]
+    fn test_from_node_ref_type_inference() {
+        let doc = Document::parse_str("bool: true\nnum: 42\nfloat: 2.5\nnull: ~").unwrap();
+        let root = doc.root().unwrap();
+        let value = Value::from_node_ref(root).unwrap();
+        assert_eq!(value["bool"], Value::Bool(true));
+        assert_eq!(value["num"], Value::Number(Number::UInt(42)));
+        assert_eq!(value["float"], Value::Number(Number::Float(2.5)));
+        assert_eq!(value["null"], Value::Null);
     }
 
     #[test]

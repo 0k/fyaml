@@ -1,7 +1,8 @@
 //! YAML emission for Value using libfyaml.
 
 use super::{Number, TaggedValue, Value};
-use crate::document::FyDocument;
+use crate::error::{Error, Result};
+use crate::Document;
 use fyaml_sys::*;
 use libc::c_void;
 use std::ffi::CStr;
@@ -26,23 +27,23 @@ impl Value {
     /// let yaml = value.to_yaml_string().unwrap();
     /// assert!(yaml.contains("key: value"));
     /// ```
-    pub fn to_yaml_string(&self) -> Result<String, String> {
+    pub fn to_yaml_string(&self) -> Result<String> {
         // Create a new document
-        let doc = FyDocument::new()?;
+        let doc = Document::new()?;
 
         // Convert value to libfyaml node
-        let node_ptr = self.to_fy_node(doc.doc_ptr)?;
+        let node_ptr = self.to_fy_node(doc.as_ptr())?;
 
         // Set as document root
-        let ret = unsafe { fy_document_set_root(doc.doc_ptr, node_ptr) };
+        let ret = unsafe { fy_document_set_root(doc.as_ptr(), node_ptr) };
         if ret != 0 {
-            return Err("Failed to set document root".to_string());
+            return Err(Error::Ffi("fy_document_set_root failed"));
         }
 
         // Emit to string
-        let ptr = unsafe { fy_emit_document_to_string(doc.doc_ptr, FYECF_MODE_DEJSON) };
+        let ptr = unsafe { fy_emit_document_to_string(doc.as_ptr(), FYECF_MODE_DEJSON) };
         if ptr.is_null() {
-            return Err("Failed to emit document to string".to_string());
+            return Err(Error::Ffi("fy_emit_document_to_string returned null"));
         }
 
         let s = unsafe { CStr::from_ptr(ptr) }
@@ -56,12 +57,12 @@ impl Value {
     /// Converts this Value to a libfyaml node.
     ///
     /// The node is owned by the document and will be freed when the document is dropped.
-    fn to_fy_node(&self, doc_ptr: *mut fy_document) -> Result<*mut fy_node, String> {
+    fn to_fy_node(&self, doc_ptr: *mut fy_document) -> Result<*mut fy_node> {
         match self {
             Value::Null => {
                 let node_ptr = unsafe { fy_node_create_scalar_copy(doc_ptr, ptr::null(), 0) };
                 if node_ptr.is_null() {
-                    return Err("Failed to create null node".to_string());
+                    return Err(Error::Ffi("fy_node_create_scalar_copy returned null"));
                 }
                 Ok(node_ptr)
             }
@@ -71,7 +72,7 @@ impl Value {
                     fy_node_create_scalar_copy(doc_ptr, s.as_ptr() as *const i8, s.len())
                 };
                 if node_ptr.is_null() {
-                    return Err("Failed to create bool node".to_string());
+                    return Err(Error::Ffi("fy_node_create_scalar_copy returned null"));
                 }
                 Ok(node_ptr)
             }
@@ -97,7 +98,7 @@ impl Value {
                     fy_node_create_scalar_copy(doc_ptr, s.as_ptr() as *const i8, s.len())
                 };
                 if node_ptr.is_null() {
-                    return Err("Failed to create number node".to_string());
+                    return Err(Error::Ffi("fy_node_create_scalar_copy returned null"));
                 }
                 Ok(node_ptr)
             }
@@ -106,20 +107,20 @@ impl Value {
                     fy_node_create_scalar_copy(doc_ptr, s.as_ptr() as *const i8, s.len())
                 };
                 if node_ptr.is_null() {
-                    return Err("Failed to create string node".to_string());
+                    return Err(Error::Ffi("fy_node_create_scalar_copy returned null"));
                 }
                 Ok(node_ptr)
             }
             Value::Sequence(seq) => {
                 let seq_ptr = unsafe { fy_node_create_sequence(doc_ptr) };
                 if seq_ptr.is_null() {
-                    return Err("Failed to create sequence node".to_string());
+                    return Err(Error::Ffi("fy_node_create_sequence returned null"));
                 }
                 for item in seq {
                     let item_ptr = item.to_fy_node(doc_ptr)?;
                     let ret = unsafe { fy_node_sequence_append(seq_ptr, item_ptr) };
                     if ret != 0 {
-                        return Err("Failed to append to sequence".to_string());
+                        return Err(Error::Ffi("fy_node_sequence_append failed"));
                     }
                 }
                 Ok(seq_ptr)
@@ -127,14 +128,14 @@ impl Value {
             Value::Mapping(map) => {
                 let map_ptr = unsafe { fy_node_create_mapping(doc_ptr) };
                 if map_ptr.is_null() {
-                    return Err("Failed to create mapping node".to_string());
+                    return Err(Error::Ffi("fy_node_create_mapping returned null"));
                 }
                 for (key, value) in map {
                     let key_ptr = key.to_fy_node(doc_ptr)?;
                     let value_ptr = value.to_fy_node(doc_ptr)?;
                     let ret = unsafe { fy_node_mapping_append(map_ptr, key_ptr, value_ptr) };
                     if ret != 0 {
-                        return Err("Failed to append to mapping".to_string());
+                        return Err(Error::Ffi("fy_node_mapping_append failed"));
                     }
                 }
                 Ok(map_ptr)
@@ -147,7 +148,7 @@ impl Value {
                 let ret =
                     unsafe { fy_node_set_tag(value_ptr, tag.as_ptr() as *const i8, tag.len()) };
                 if ret != 0 {
-                    return Err("Failed to set tag on node".to_string());
+                    return Err(Error::Ffi("fy_node_set_tag failed"));
                 }
                 Ok(value_ptr)
             }
@@ -157,7 +158,7 @@ impl Value {
 
 impl TaggedValue {
     /// Emits this tagged value as a YAML string.
-    pub fn to_yaml_string(&self) -> Result<String, String> {
+    pub fn to_yaml_string(&self) -> Result<String> {
         Value::Tagged(Box::new(self.clone())).to_yaml_string()
     }
 }
@@ -191,9 +192,9 @@ mod tests {
         let yaml = value.to_yaml_string().unwrap();
         assert!(yaml.contains("42"));
 
-        let value = Value::Number(Number::Float(3.14));
+        let value = Value::Number(Number::Float(2.5));
         let yaml = value.to_yaml_string().unwrap();
-        assert!(yaml.contains("3.14"));
+        assert!(yaml.contains("2.5"));
     }
 
     #[test]

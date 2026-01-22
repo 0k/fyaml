@@ -88,8 +88,8 @@ mod tests {
             "42"
         );
         assert_eq!(
-            serde_json::to_string(&Value::Number(Number::Float(3.14))).unwrap(),
-            "3.14"
+            serde_json::to_string(&Value::Number(Number::Float(2.5))).unwrap(),
+            "2.5"
         );
     }
 

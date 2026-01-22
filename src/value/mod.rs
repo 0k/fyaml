@@ -3,6 +3,21 @@
 //! This module provides a pure Rust [`Value`] type that can represent any YAML value,
 //! with full serde compatibility and libfyaml-powered emission.
 //!
+//! # Memory Model
+//!
+//! **`Value` is a fully-owned type that allocates memory.** When you parse YAML into
+//! a `Value`, all strings, sequences, and mappings are copied into Rust-owned memory.
+//!
+//! For zero-copy access to YAML data, use [`ValueRef`](crate::ValueRef) or
+//! [`NodeRef`](crate::NodeRef) instead. These borrow data directly from libfyaml's
+//! buffers without allocation.
+//!
+//! | Type | Allocation | Lifetime | Serde | Use Case |
+//! |------|------------|----------|-------|----------|
+//! | `Value` | Yes (owns data) | `'static` | Yes | Serialize, transform, long-lived data |
+//! | `ValueRef<'doc>` | No (borrows) | Tied to Document | No | Read-only, performance-critical |
+//! | `NodeRef<'doc>` | No (borrows) | Tied to Document | No | Low-level access, iteration |
+//!
 //! # Features
 //!
 //! - Parse YAML into `Value` using libfyaml
@@ -40,6 +55,12 @@ use std::str::FromStr;
 ///
 /// This is a pure Rust enum, making it easy to construct, manipulate,
 /// and serialize. For YAML emission, it converts to libfyaml nodes.
+///
+/// # Allocation
+///
+/// `Value` owns all its data. Parsing YAML into `Value` allocates memory for
+/// all strings and nested structures. For zero-copy access, use
+/// [`ValueRef`](crate::ValueRef) instead.
 #[derive(Clone, Debug)]
 pub enum Value {
     /// Null value (YAML `null`, `~`, or empty).
@@ -246,19 +267,37 @@ pub trait AsValueKey {
 
 impl AsValueKey for str {
     fn get_from_map<'a>(&self, map: &'a IndexMap<Value, Value>) -> Option<&'a Value> {
-        map.get(&Value::String(self.to_string()))
+        // Zero-copy lookup: iterate and compare without allocating
+        for (k, v) in map {
+            if let Value::String(s) = k {
+                if s == self {
+                    return Some(v);
+                }
+            }
+        }
+        None
     }
     fn get_from_map_mut<'a>(&self, map: &'a mut IndexMap<Value, Value>) -> Option<&'a mut Value> {
-        map.get_mut(&Value::String(self.to_string()))
+        // Zero-copy lookup: iterate and compare without allocating
+        for (k, v) in map {
+            if let Value::String(s) = k {
+                if s == self {
+                    return Some(v);
+                }
+            }
+        }
+        None
     }
 }
 
 impl AsValueKey for String {
     fn get_from_map<'a>(&self, map: &'a IndexMap<Value, Value>) -> Option<&'a Value> {
-        map.get(&Value::String(self.clone()))
+        // Delegate to str implementation (zero-copy)
+        self.as_str().get_from_map(map)
     }
     fn get_from_map_mut<'a>(&self, map: &'a mut IndexMap<Value, Value>) -> Option<&'a mut Value> {
-        map.get_mut(&Value::String(self.clone()))
+        // Delegate to str implementation (zero-copy)
+        self.as_str().get_from_map_mut(map)
     }
 }
 
@@ -463,14 +502,16 @@ impl std::ops::Index<usize> for Value {
     }
 }
 
-// FromStr implementation uses convert module
 impl FromStr for Value {
-    type Err = String;
+    type Err = crate::error::Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        use crate::node::Node;
-        let node = Node::from_str(s)?;
-        Value::from_node(&node)
+    fn from_str(s: &str) -> crate::error::Result<Self> {
+        use crate::Document;
+        let doc = Document::parse_str(s)?;
+        let root = doc
+            .root()
+            .ok_or(crate::error::Error::Parse("empty document"))?;
+        Value::from_node_ref(root)
     }
 }
 
@@ -572,7 +613,7 @@ mod tests {
         assert_eq!(Value::Bool(true).as_bool(), Some(true));
         assert_eq!(Value::Number(Number::Int(42)).as_i64(), Some(42));
         assert_eq!(Value::Number(Number::UInt(42)).as_u64(), Some(42));
-        assert_eq!(Value::Number(Number::Float(3.14)).as_f64(), Some(3.14));
+        assert_eq!(Value::Number(Number::Float(2.5)).as_f64(), Some(2.5));
         assert_eq!(Value::String("hello".into()).as_str(), Some("hello"));
     }
 
@@ -614,7 +655,7 @@ mod tests {
         assert_eq!(Value::from(true), Value::Bool(true));
         assert_eq!(Value::from(42i64), Value::Number(Number::Int(42)));
         assert_eq!(Value::from(42u64), Value::Number(Number::UInt(42)));
-        assert_eq!(Value::from(3.14f64), Value::Number(Number::Float(3.14)));
+        assert_eq!(Value::from(2.5f64), Value::Number(Number::Float(2.5)));
         assert_eq!(Value::from("hello"), Value::String("hello".into()));
     }
 }

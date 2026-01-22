@@ -16,6 +16,21 @@
 //! - Iterate over mapping key-value pairs and sequence items
 //! - Multi-document stream parsing from strings or stdin
 //! - **[`Value`] type**: Pure Rust enum with serde support and libfyaml-powered emission
+//! - Zero-copy scalar access via lifetime-bound [`NodeRef`] and [`ValueRef`]
+//!
+//! # Memory Model: Choosing the Right Type
+//!
+//! libfyaml is a zero-copy parser - it avoids copying string data during parsing.
+//! This crate exposes that efficiency through different types:
+//!
+//! | Type | Allocates? | Use When |
+//! |------|------------|----------|
+//! | [`Value`] | Yes | You need serde, transformation, or owned data |
+//! | [`ValueRef<'doc>`] | No | Reading typed values (i64, bool, str) without copies |
+//! | [`NodeRef<'doc>`] | No | Low-level access, iteration, raw byte access |
+//!
+//! **For best performance**, use `NodeRef` or `ValueRef` when you only need to read
+//! data. Convert to `Value` only when you need ownership or serde compatibility.
 //!
 //! # Quick Start with Value
 //!
@@ -35,19 +50,20 @@
 //! assert!(yaml.contains("name: Alice"));
 //! ```
 //!
-//! # Low-level Node API
+//! # Low-level Document API
 //!
-//! For more control, use the [`Node`](node::Node) API directly:
+//! For more control and zero-copy access, use the [`Document`] API directly:
 //!
 //! ```
-//! use fyaml::node::Node;
-//! use std::str::FromStr;
+//! use fyaml::Document;
 //!
 //! let yaml = "database:\n  host: localhost\n  port: 5432";
-//! let root = Node::from_str(yaml).unwrap();
+//! let doc = Document::parse_str(yaml).unwrap();
+//! let root = doc.root().unwrap();
 //!
-//! let host = root.node_by_path("/database/host").unwrap();
-//! assert_eq!(host.to_raw_string().unwrap(), "localhost");
+//! // Zero-copy: returns &str pointing into document memory
+//! let host = root.at_path("/database/host").unwrap();
+//! assert_eq!(host.scalar_str().unwrap(), "localhost");
 //! ```
 //!
 //! # Path Syntax
@@ -56,6 +72,41 @@
 //! - `/key` - access a mapping key
 //! - `/0` - access a sequence index
 //! - `/parent/child/0` - nested access
+//!
+//! # Mutation via Editor
+//!
+//! Use [`Document::edit()`] to get an exclusive [`Editor`] for modifications:
+//!
+//! ```
+//! use fyaml::Document;
+//!
+//! let mut doc = Document::parse_str("name: Alice").unwrap();
+//!
+//! // Mutation phase - NodeRef cannot exist during this
+//! {
+//!     let mut ed = doc.edit();
+//!     ed.set_yaml_at("/name", "'Bob'").unwrap();
+//!     ed.set_yaml_at("/age", "30").unwrap();
+//! }
+//!
+//! // Read phase
+//! let root = doc.root().unwrap();
+//! assert_eq!(root.at_path("/name").unwrap().scalar_str().unwrap(), "Bob");
+//! ```
+//!
+//! # Multi-Document Streams
+//!
+//! Use [`FyParser`] for parsing YAML streams with multiple documents:
+//!
+//! ```
+//! use fyaml::FyParser;
+//!
+//! let yaml = "---\ndoc1: value1\n---\ndoc2: value2";
+//! let parser = FyParser::from_string(yaml).unwrap();
+//!
+//! let docs: Vec<_> = parser.doc_iter().filter_map(|r| r.ok()).collect();
+//! assert_eq!(docs.len(), 2);
+//! ```
 //!
 //! # Serde Integration
 //!
@@ -76,36 +127,60 @@
 //! assert_eq!(from_json["key"].as_str(), Some("value"));
 //! ```
 
-pub mod document;
-pub mod node;
+mod config;
+pub mod error;
+mod ffi_util;
+mod node;
+mod scalar_parse;
 pub mod value;
 
-// Re-export commonly used types
+// Core modules (formerly v2)
+mod document;
+mod editor;
+mod iter;
+mod node_ref;
+mod parser;
+mod value_ref;
+
+// Re-export main API
+pub use document::Document;
+pub use editor::{Editor, RawNodeHandle};
+pub use iter::{MapIter, SeqIter};
+pub use node::{NodeStyle, NodeType};
+pub use node_ref::NodeRef;
+pub use parser::{DocumentIterator, FyParser};
+pub use value_ref::ValueRef;
+
+// Re-export error and value types
+pub use error::{Error, Result};
 pub use value::{Number, TaggedValue, Value};
 
 /// Returns the version string of the underlying libfyaml C library.
-pub fn get_c_version() -> Result<String, String> {
+pub fn get_c_version() -> Result<String> {
     log::trace!("get_c_version()");
     let cstr_ptr = unsafe { fyaml_sys::fy_library_version() };
     if cstr_ptr.is_null() {
         log::error!("Null pointer received from fy_library_version");
-        return Err("Unknown version".to_string());
+        return Err(Error::Ffi("fy_library_version returned null"));
     }
     log::trace!("convert to string");
     let str = unsafe { std::ffi::CStr::from_ptr(cstr_ptr) };
     log::trace!("done !");
-    Ok(str.to_string_lossy().to_string())
+    Ok(str.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::node::Node;
-    use std::str::FromStr;
+    use crate::Document;
 
     fn path(yaml: &str, path: &str) -> String {
-        let dom = Node::from_str(yaml).unwrap();
-        let node = dom.node_by_path(path).unwrap();
-        node.to_string()
+        let doc = Document::parse_str(yaml).unwrap();
+        let root = doc.root().unwrap();
+        if path.is_empty() {
+            root.emit().unwrap()
+        } else {
+            root.at_path(path).unwrap().emit().unwrap()
+        }
     }
 
     #[test]
@@ -123,15 +198,14 @@ mod tests {
 
     #[test]
     fn test_no_path() {
-        assert_eq!(
-            path(
-                r#"
+        let result = path(
+            r#"
         foo: bar
         "#,
-                ""
-            ),
-            "foo: bar"
+            "",
         );
+        // emit() may or may not include trailing newline
+        assert!(result.trim() == "foo: bar");
     }
 
     #[test]
@@ -141,7 +215,7 @@ mod tests {
                 r#"
         foo: "bar: wiz"
         "#,
-                "foo"
+                "/foo"
             ),
             "\"bar: wiz\""
         );

@@ -1,0 +1,11 @@
+error[E0502]: cannot borrow `ed` as mutable because it is also borrowed as immutable
+  --> tests/compile_fail/editor_root_noderef_mutation.rs:16:5
+   |
+13 |     let root = ed.root().unwrap();
+   |                -- immutable borrow occurs here
+...
+16 |     ed.set_yaml_at("/key", "'new_value'").unwrap();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+...
+19 |     let _ = root.scalar_str();
+   |             ---- immutable borrow later used here

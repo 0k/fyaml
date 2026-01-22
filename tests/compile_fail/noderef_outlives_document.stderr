@@ -1,0 +1,13 @@
+error[E0597]: `doc` does not live long enough
+  --> tests/compile_fail/noderef_outlives_document.rs:12:20
+   |
+11 |         let doc = Document::parse_str("key: value").unwrap();
+   |             --- binding `doc` declared here
+12 |         let root = doc.root().unwrap();
+   |                    ^^^ borrowed value does not live long enough
+...
+15 |     }
+   |     - `doc` dropped here while still borrowed
+16 |     // This line would use a dangling reference - should not compile!
+17 |     let _ = node_ref.scalar_str();
+   |             -------- borrow later used here

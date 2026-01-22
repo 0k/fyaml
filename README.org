@@ -7,8 +7,8 @@ manipulating YAML documents.
 
 ~fyaml~ provides an idiomatic Rust interface to the high-performance
 =libfyaml= YAML parsing library. It supports DOM-style navigation,
-node type introspection, multi-document parsing, and a serde-compatible
-~Value~ type for easy YAML manipulation.
+zero-copy scalar access, node type introspection, multi-document
+parsing, document mutation, and a serde-compatible ~Value~ type.
 
 ** Status
 
@@ -36,16 +36,113 @@ path-based queries are convenient.
 ** Features
 
 - Parse YAML strings into document objects
+- *Zero-copy scalar access* via lifetime-bound ~NodeRef~ and ~ValueRef~
 - Navigate nodes using path-based queries (e.g., ~/foo/bar~, ~/list/0~)
 - Support for all YAML node types: scalars, sequences, and mappings
 - Iterate over mapping key-value pairs and sequence items
 - Convert nodes back to YAML strings
-- Multi-document stream parsing
-- Read YAML from stdin
+- Multi-document stream parsing via ~FyParser~
+- Read YAML from stdin (single document or stream)
+- *Document mutation* via ~Editor~ with compile-time safety
+- *Style and comment preservation* during edits: comments, quote styles, block/flow structure
+- *~ValueRef~ type*: Zero-copy typed access with YAML type interpretation
+  - ~as_str()~, ~as_bool()~, ~as_i64()~, ~as_f64()~, ~is_null()~
+  - Non-plain scalars (quoted, literal, folded) preserved as strings
 - *~Value~ type*: Pure Rust enum with serde support
   - Serialize/deserialize with any serde-compatible format (JSON, TOML, etc.)
   - Emit YAML using libfyaml for standards-compliant output
   - Convenient indexing: ~value["key"]~, ~value[0]~
+
+** Zero-Copy Architecture
+
+~fyaml~ leverages libfyaml's zero-copy design for efficient memory usage.
+When you access scalar values through ~NodeRef~ or ~ValueRef~, you get
+references directly into the parsed document buffer - no string copying
+or allocation occurs.
+
+#+begin_src rust
+use fyaml::Document;
+
+let doc = Document::parse_str("message: Hello, World!").unwrap();
+let root = doc.root().unwrap();
+let node = root.at_path("/message").unwrap();
+
+// Zero-copy: this &str points directly into the document's memory
+let s: &str = node.scalar_str().unwrap();
+assert_eq!(s, "Hello, World!");
+
+// The reference is tied to the document's lifetime -
+// this prevents use-after-free at compile time
+#+end_src
+
+This is particularly beneficial for:
+- *Large documents*: Read gigabytes of YAML without doubling memory usage
+- *Config parsing*: Extract only the values you need without copying everything
+- *High-throughput processing*: Minimize allocations in hot paths
+
+** Style and Comment Preservation
+
+When modifying documents with ~Editor~, ~fyaml~ preserves formatting and
+comments. This is essential for configuration files where maintaining the
+original style improves readability and diff-friendliness.
+
+*** What IS preserved:
+
+- *Comments*: Top-level, inline, and end-of-line comments
+- *Quote styles*: Single-quoted (~'value'~), double-quoted (~"value"~), and plain scalars
+- *Block scalar styles*: Literal (~|~) and folded (~>~) blocks
+- *Collection styles*: Flow (~[a, b]~, ~{a: 1}~) vs block (indented) sequences/mappings
+
+#+begin_src rust
+use fyaml::Document;
+
+// Comments and quote styles are preserved through edits
+let yaml = "# Database configuration
+database:
+  host: 'localhost'  # local dev server
+  port: 5432
+";
+
+let mut doc = Document::parse_str(yaml).unwrap();
+{
+    let mut ed = doc.edit();
+    ed.set_yaml_at("/database/port", "5433").unwrap();
+}
+
+let output = doc.emit().unwrap();
+// Comments preserved
+assert!(output.contains("# Database configuration"));
+assert!(output.contains("# local dev server"));
+// Quote style preserved
+assert!(output.contains("'localhost'"));
+#+end_src
+
+Block scalars are also preserved:
+
+#+begin_src rust
+use fyaml::Document;
+
+let yaml = "script: |
+  echo hello
+  echo world
+name: test
+";
+
+let mut doc = Document::parse_str(yaml).unwrap();
+{
+    let mut ed = doc.edit();
+    ed.set_yaml_at("/name", "modified").unwrap();
+}
+
+let output = doc.emit().unwrap();
+// Literal block style (|) is preserved for the script
+assert!(output.contains("script: |"));
+#+end_src
+
+*** Formatting notes:
+
+- Flow collections (~[a, b]~, ~{a: 1}~) are preserved as flow style but may be
+  reformatted across multiple lines by libfyaml's emitter
 
 ** Installation
 
@@ -53,12 +150,12 @@ Add to your ~Cargo.toml~:
 
 #+begin_src toml
 [dependencies]
-fyaml = "0.1"
+fyaml = "0.3"
 #+end_src
 
 ** Usage
 
-*** Working with Value (recommended)
+*** Working with Value (high-level, owned)
 
 The ~Value~ type provides a convenient, serde-compatible way to work with YAML:
 
@@ -74,6 +171,153 @@ assert_eq!(value["age"].as_i64(), Some(30));
 
 // Emit back to YAML
 let yaml = value.to_yaml_string().unwrap();
+#+end_src
+
+*** Zero-copy with Document and NodeRef
+
+For more control and zero-copy scalar access, use the ~Document~ API:
+
+#+begin_src rust
+use fyaml::Document;
+
+let doc = Document::parse_str("database:\n  host: localhost\n  port: 5432").unwrap();
+let root = doc.root().unwrap();
+
+// Zero-copy: returns &str pointing into document memory
+let host = root.at_path("/database/host").unwrap();
+assert_eq!(host.scalar_str().unwrap(), "localhost");
+
+// Navigation by path
+let port = root.at_path("/database/port").unwrap();
+assert_eq!(port.scalar_str().unwrap(), "5432");
+#+end_src
+
+*** Zero-copy typed access with ValueRef
+
+~ValueRef~ wraps ~NodeRef~ and provides typed accessors that interpret
+YAML scalars on demand without allocation:
+
+#+begin_src rust
+use fyaml::Document;
+
+let doc = Document::parse_str("name: Alice\nage: 30\nactive: yes").unwrap();
+let root = doc.root_value().unwrap();
+
+// Zero-copy typed access
+assert_eq!(root.get("name").unwrap().as_str(), Some("Alice"));
+assert_eq!(root.get("age").unwrap().as_i64(), Some(30));
+assert_eq!(root.get("active").unwrap().as_bool(), Some(true));  // yes -> true
+#+end_src
+
+Non-plain scalars (quoted, literal ~|~, folded ~>~) are NOT type-interpreted:
+
+#+begin_src rust
+use fyaml::Document;
+
+let doc = Document::parse_str("quoted: 'true'\nunquoted: true").unwrap();
+let root = doc.root_value().unwrap();
+
+// Quoted: string, not bool
+assert_eq!(root.get("quoted").unwrap().as_bool(), None);
+assert_eq!(root.get("quoted").unwrap().as_str(), Some("true"));
+
+// Unquoted: interpreted as bool
+assert_eq!(root.get("unquoted").unwrap().as_bool(), Some(true));
+#+end_src
+
+*** Mutation with Editor
+
+Use ~Document::edit()~ to get an exclusive ~Editor~ for modifications:
+
+#+begin_src rust
+use fyaml::Document;
+
+let mut doc = Document::parse_str("name: Alice").unwrap();
+
+// Mutation phase - NodeRef cannot exist during this
+{
+    let mut ed = doc.edit();
+    ed.set_yaml_at("/name", "'Bob'").unwrap();   // Preserve quotes
+    ed.set_yaml_at("/age", "30").unwrap();       // Add new key
+    ed.delete_at("/name").unwrap();              // Delete key
+    ed.set_yaml_at("/name", "\"Charlie\"").unwrap();  // Re-add
+}
+
+// Read phase - safe to access nodes again
+let root = doc.root().unwrap();
+assert_eq!(root.at_path("/name").unwrap().scalar_str().unwrap(), "Charlie");
+assert_eq!(root.at_path("/age").unwrap().scalar_str().unwrap(), "30");
+#+end_src
+
+Building complex structures:
+
+#+begin_src rust
+use fyaml::Document;
+
+let mut doc = Document::new().unwrap();
+{
+    let mut ed = doc.edit();
+    let root = ed.build_from_yaml("users:\n  - name: Alice\n  - name: Bob").unwrap();
+    ed.set_root(root).unwrap();
+}
+assert!(doc.root().is_some());
+#+end_src
+
+*** Multi-document parsing with FyParser
+
+Use ~FyParser~ for parsing YAML streams with multiple documents:
+
+#+begin_src rust
+use fyaml::FyParser;
+
+let yaml = "---\ndoc1: value1\n---\ndoc2: value2";
+let parser = FyParser::from_string(yaml).unwrap();
+
+let docs: Vec<_> = parser.doc_iter().filter_map(|r| r.ok()).collect();
+assert_eq!(docs.len(), 2);
+
+// Each document is independent
+assert_eq!(docs[0].at_path("/doc1").unwrap().scalar_str().unwrap(), "value1");
+assert_eq!(docs[1].at_path("/doc2").unwrap().scalar_str().unwrap(), "value2");
+#+end_src
+
+*** Reading from stdin
+
+For CLI tools that read YAML from stdin:
+
+#+begin_src rust
+use fyaml::Document;
+
+// Single document from stdin
+let doc = Document::from_stdin().unwrap();
+println!("{}", doc.emit().unwrap());
+#+end_src
+
+For multi-document streams:
+
+#+begin_src rust
+use fyaml::FyParser;
+
+// Default: line-buffered mode for interactive/streaming use
+let parser = FyParser::from_stdin().unwrap();
+
+for doc_result in parser.doc_iter() {
+    let doc = doc_result.unwrap();
+    println!("{}", doc.emit().unwrap());
+}
+#+end_src
+
+For batch processing where efficiency matters more than interactivity:
+
+#+begin_src rust
+use fyaml::FyParser;
+
+// Block-buffered mode: more efficient for large inputs
+let parser = FyParser::from_stdin_with_line_buffer(false).unwrap();
+
+for doc_result in parser.doc_iter() {
+    // Process each document
+}
 #+end_src
 
 *** Serde integration
@@ -93,140 +337,149 @@ assert_eq!(json, r#"{"key":"value"}"#);
 let from_json: Value = serde_json::from_str(&json).unwrap();
 #+end_src
 
-*** Low-level Node API
-
-For more control, use the ~Node~ API directly:
-
-*** Parsing a YAML string
-
-#+begin_src rust
-use fyaml::node::Node;
-use std::str::FromStr;
-
-let yaml = "foo: bar";
-let root = Node::from_str(yaml).unwrap();
-let node = root.node_by_path("/foo").unwrap();
-assert_eq!(node.to_string(), "bar");
-#+end_src
-
-*** Navigating nested structures
-
-#+begin_src rust
-use fyaml::node::Node;
-use std::str::FromStr;
-
-let yaml = r#"
-database:
-  host: localhost
-  port: 5432
-  users:
-    - admin
-    - guest
-"#;
-
-let root = Node::from_str(yaml).unwrap();
-
-// Access nested mapping
-let host = root.node_by_path("/database/host").unwrap();
-assert_eq!(host.to_raw_string(), "localhost");
-
-// Access sequence item by index
-let first_user = root.node_by_path("/database/users/0").unwrap();
-assert_eq!(first_user.to_raw_string(), "admin");
-#+end_src
-
 *** Iterating over mappings
 
 #+begin_src rust
-use fyaml::node::Node;
-use std::str::FromStr;
+use fyaml::Document;
 
-let yaml = "a: 1\nb: 2\nc: 3";
-let root = Node::from_str(yaml).unwrap();
+let doc = Document::parse_str("a: 1\nb: 2\nc: 3").unwrap();
+let root = doc.root().unwrap();
 
 for (key, value) in root.map_iter() {
-    println!("{}: {}", key.to_raw_string(), value.to_raw_string());
+    println!("{}: {}", key.scalar_str().unwrap(), value.scalar_str().unwrap());
 }
 #+end_src
 
 *** Iterating over sequences
 
 #+begin_src rust
-use fyaml::node::Node;
-use std::str::FromStr;
+use fyaml::Document;
 
-let yaml = "- apple\n- banana\n- cherry";
-let root = Node::from_str(yaml).unwrap();
+let doc = Document::parse_str("- apple\n- banana\n- cherry").unwrap();
+let root = doc.root().unwrap();
 
 for item in root.seq_iter() {
-    println!("{}", item.to_raw_string());
-}
-#+end_src
-
-*** Parsing multiple documents
-
-#+begin_src rust
-use fyaml::document::{FyParser, Parse};
-
-let yaml = "---\ndoc1: value1\n---\ndoc2: value2";
-let parser = FyParser::new(yaml);
-
-for doc in parser.doc_iter() {
-    println!("{}", doc.to_string());
-}
-#+end_src
-
-*** Reading from stdin
-
-For CLI tools that read YAML from stdin:
-
-#+begin_src rust
-use fyaml::document::{FyParser, Parse};
-
-// Default: line-buffered mode for interactive/streaming use
-let parser = FyParser::from_stdin().unwrap();
-
-for doc in parser.doc_iter() {
-    println!("{}", doc.root().to_string());
-}
-#+end_src
-
-For batch processing where efficiency matters more than interactivity:
-
-#+begin_src rust
-use fyaml::document::{FyParser, Parse};
-
-// Block-buffered mode: more efficient for large inputs
-let parser = FyParser::from_stdin_with_line_buffer(false).unwrap();
-
-for doc in parser.doc_iter() {
-    // Process each document
+    println!("{}", item.scalar_str().unwrap());
 }
 #+end_src
 
 *** Checking node types
 
 #+begin_src rust
-use fyaml::node::{Node, NodeType};
-use std::str::FromStr;
+use fyaml::{Document, NodeType};
 
-let yaml = "key: value";
-let root = Node::from_str(yaml).unwrap();
+let doc = Document::parse_str("key: value").unwrap();
+let root = doc.root().unwrap();
 
 assert!(root.is_mapping());
-assert_eq!(root.get_type(), NodeType::Mapping);
+assert_eq!(root.kind(), NodeType::Mapping);
 
-let value = root.node_by_path("/key").unwrap();
+let value = root.at_path("/key").unwrap();
 assert!(value.is_scalar());
 #+end_src
 
 ** API Reference
 
-*** Value Types
+*** Main Types
 
-- ~Value~ - Pure Rust enum representing any YAML value (recommended)
-- ~Number~ - Numeric value: ~Int(i64)~, ~UInt(u64)~, ~Float(f64)~
-- ~TaggedValue~ - Value with an associated YAML tag
+| Type                | Description                                         |
+|---------------------+-----------------------------------------------------|
+| ~Document~          | Parsed YAML document (owns the data)                |
+| ~NodeRef<'doc>~     | Zero-copy reference to a node (borrows document)    |
+| ~ValueRef<'doc>~    | Zero-copy typed access (wraps NodeRef)              |
+| ~Editor<'doc>~      | Exclusive mutable access to document                |
+| ~FyParser~          | Multi-document stream parser                        |
+| ~Value~             | Owned serde-compatible YAML value                   |
+| ~Number~            | Numeric value: ~Int(i64)~, ~UInt(u64)~, ~Float(f64)~ |
+| ~TaggedValue~       | Value with an associated YAML tag                   |
+
+*** Enums
+
+| Type        | Variants                                                    |
+|-------------+-------------------------------------------------------------|
+| ~NodeType~  | ~Scalar~, ~Sequence~, ~Mapping~                             |
+| ~NodeStyle~ | ~Plain~, ~SingleQuoted~, ~DoubleQuoted~, ~Literal~, ~Folded~, etc. |
+
+*** Document Methods
+
+| Method                | Description                                   |
+|-----------------------+-----------------------------------------------|
+| ~Document::parse_str(yaml)~ | Parse YAML string into Document         |
+| ~Document::new()~     | Create empty document                         |
+| ~Document::from_stdin()~ | Parse single document from stdin           |
+| ~doc.root()~          | Get root node as ~Option<NodeRef>~            |
+| ~doc.root_value()~    | Get root node as ~Option<ValueRef>~           |
+| ~doc.at_path(path)~   | Navigate to node by path                      |
+| ~doc.edit()~          | Get exclusive ~Editor~ for mutations          |
+| ~doc.emit()~          | Emit document as YAML string                  |
+
+*** NodeRef Methods (zero-copy)
+
+| Method             | Description                                      |
+|--------------------+--------------------------------------------------|
+| ~node.kind()~      | Get node type (~NodeType~)                       |
+| ~node.style()~     | Get node style (~NodeStyle~)                     |
+| ~node.is_scalar()~ | Check if node is a scalar                        |
+| ~node.is_mapping()~ | Check if node is a mapping                      |
+| ~node.is_sequence()~ | Check if node is a sequence                    |
+| ~node.is_quoted()~ | Check if scalar is quoted                        |
+| ~node.is_non_plain()~ | Check if scalar has non-plain style           |
+| ~node.scalar_str()~ | Get scalar as ~&str~ (zero-copy)                |
+| ~node.scalar_bytes()~ | Get scalar as ~&[u8]~ (zero-copy)             |
+| ~node.at_path(path)~ | Navigate to child by path                      |
+| ~node.seq_iter()~  | Iterate over sequence items                      |
+| ~node.map_iter()~  | Iterate over mapping key-value pairs             |
+| ~node.seq_len()~   | Get sequence length                              |
+| ~node.map_len()~   | Get mapping length                               |
+| ~node.seq_get(i)~  | Get sequence item by index                       |
+| ~node.map_get(key)~ | Get mapping value by string key                 |
+| ~node.tag_str()~   | Get YAML tag (zero-copy)                         |
+| ~node.emit()~      | Emit node as YAML string                         |
+
+*** ValueRef Methods (zero-copy typed access)
+
+| Method              | Description                                      |
+|---------------------+--------------------------------------------------|
+| ~value.as_str()~    | Get string (zero-copy) ~Option<&str>~            |
+| ~value.as_bool()~   | Interpret as boolean (yes/no/on/off/true/false)  |
+| ~value.as_i64()~    | Interpret as signed integer (hex/octal/binary)   |
+| ~value.as_u64()~    | Interpret as unsigned integer                    |
+| ~value.as_f64()~    | Interpret as float (.inf, .nan support)          |
+| ~value.is_null()~   | Check for null/~/empty                           |
+| ~value.is_scalar()~ | Check if scalar                                  |
+| ~value.is_sequence()~ | Check if sequence                              |
+| ~value.is_mapping()~ | Check if mapping                                |
+| ~value.get(key)~    | Get mapping value by key                         |
+| ~value.index(i)~    | Get sequence item by index                       |
+| ~value.at_path(path)~ | Navigate by path                               |
+| ~value.seq_iter()~  | Iterate over sequence as ~ValueRef~              |
+| ~value.map_iter()~  | Iterate over mapping as ~(ValueRef, ValueRef)~   |
+| ~value.tag()~       | Get YAML tag (zero-copy)                         |
+
+*** Editor Methods
+
+| Method                        | Description                               |
+|-------------------------------+-------------------------------------------|
+| ~ed.set_yaml_at(path, yaml)~  | Set/replace value at path from YAML       |
+| ~ed.delete_at(path)~          | Delete value at path, returns ~bool~      |
+| ~ed.build_from_yaml(yaml)~    | Build detached node from YAML             |
+| ~ed.build_scalar(value)~      | Build plain scalar node                   |
+| ~ed.build_sequence()~         | Build empty sequence node                 |
+| ~ed.build_mapping()~          | Build empty mapping node                  |
+| ~ed.set_root(handle)~         | Set document root                         |
+| ~ed.copy_node(node)~          | Copy node from any document               |
+| ~ed.seq_append_at(path, item)~ | Append item to sequence at path          |
+| ~ed.root()~                   | Read root during edit session             |
+| ~ed.at_path(path)~            | Navigate during edit session              |
+
+*** FyParser Methods
+
+| Method                           | Description                              |
+|----------------------------------+------------------------------------------|
+| ~FyParser::from_string(yaml)~    | Create parser from YAML string           |
+| ~FyParser::from_stdin()~         | Create parser from stdin (line-buffered) |
+| ~FyParser::from_stdin_with_line_buffer(b)~ | Configurable buffering         |
+| ~parser.doc_iter()~              | Iterate over documents (yields ~Result<Document>~) |
 
 *** Value Methods
 
@@ -240,49 +493,25 @@ assert!(value.is_scalar());
 | ~is_string()~      | Check if value is a string               |
 | ~is_sequence()~    | Check if value is a sequence             |
 | ~is_mapping()~     | Check if value is a mapping              |
+| ~is_tagged()~      | Check if value has a tag                 |
 | ~as_str()~         | Get as ~&str~ if string                  |
 | ~as_i64()~         | Get as ~i64~ if numeric                  |
+| ~as_u64()~         | Get as ~u64~ if numeric                  |
 | ~as_f64()~         | Get as ~f64~ if numeric                  |
 | ~as_bool()~        | Get as ~bool~ if boolean                 |
 | ~as_sequence()~    | Get as ~&[Value]~ if sequence            |
 | ~as_mapping()~     | Get as ~&IndexMap~ if mapping            |
-| ~get()~            | Get value by key from mapping            |
+| ~as_tagged()~      | Get as ~&TaggedValue~ if tagged          |
+| ~get(key)~         | Get value by key from mapping            |
 | ~[key]~ / ~[idx]~  | Index into mapping or sequence           |
 
-*** Node Types (low-level API)
+*** Iterators
 
-- ~Node~ - Safe wrapper around YAML nodes
-- ~Document~ - Safe wrapper around YAML documents
-- ~FyParser~ - YAML parser (supports strings and stdin)
-- ~NodeType~ - Enum: ~Scalar~, ~Sequence~, ~Mapping~
-- ~MappingIterator~ - Iterator over mapping key-value pairs
-- ~SequenceIterator~ - Iterator over sequence items
-
-*** Node Methods
-
-| Method            | Description                              |
-|-------------------+------------------------------------------|
-| ~node_by_path()~  | Navigate to node by path                 |
-| ~get_type()~      | Get the node type                        |
-| ~is_scalar()~     | Check if node is a scalar                |
-| ~is_mapping()~    | Check if node is a mapping               |
-| ~is_sequence()~   | Check if node is a sequence              |
-| ~to_raw_string()~ | Get raw scalar value                     |
-| ~to_string()~     | Get YAML string representation           |
-| ~get_tag()~       | Get optional YAML tag                    |
-| ~seq_len()~       | Get sequence length                      |
-| ~map_len()~       | Get mapping length                       |
-| ~map_iter()~      | Iterate over mapping entries             |
-| ~seq_iter()~      | Iterate over sequence items              |
-
-*** FyParser Methods
-
-| Method                           | Description                              |
-|----------------------------------+------------------------------------------|
-| ~new(yaml)~                      | Create parser from YAML string           |
-| ~from_stdin()~                   | Create parser reading from stdin (line-buffered) |
-| ~from_stdin_with_line_buffer(b)~ | Create parser from stdin with configurable buffering |
-| ~doc_iter()~                     | Iterate over documents in stream         |
+| Type               | Yields                      | Description                |
+|--------------------+-----------------------------+----------------------------|
+| ~SeqIter<'doc>~    | ~NodeRef<'doc>~             | Sequence items             |
+| ~MapIter<'doc>~    | ~(NodeRef<'doc>, NodeRef<'doc>)~ | Mapping key-value pairs |
+| ~DocumentIterator~ | ~Result<Document>~          | Documents in stream        |
 
 ** Dependencies
 

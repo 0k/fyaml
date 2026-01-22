@@ -1,0 +1,11 @@
+error[E0502]: cannot borrow `doc` as mutable because it is also borrowed as immutable
+  --> tests/compile_fail/edit_blocks_noderef.rs:13:15
+   |
+10 |     let root = doc.root().unwrap(); // immutable borrow of doc
+   |                --- immutable borrow occurs here
+...
+13 |     let _ed = doc.edit();
+   |               ^^^^^^^^^^ mutable borrow occurs here
+...
+16 |     let _ = root.scalar_str();
+   |             ---- immutable borrow later used here
