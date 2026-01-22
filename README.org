@@ -591,6 +591,14 @@ assert!(value.is_scalar());
 - ~serde~ - Serialization framework
 - ~indexmap~ - Order-preserving map for YAML mappings
 
+** Test Coverage
+
+| Metric    | Coverage |
+|-----------+----------|
+| Lines     |   88.44% |
+| Functions |   91.29% |
+| Regions   |   90.44% |
+
 ** Other Rust YAML Libraries
 
 | Library | Engine | Serde | Status |
