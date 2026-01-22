@@ -53,6 +53,40 @@ path-based queries are convenient.
   - Emit YAML using libfyaml for standards-compliant output
   - Convenient indexing: ~value["key"]~, ~value[0]~
 
+** Error Handling
+
+Parse errors include detailed location information (line and column numbers),
+making it easy to report errors to users or integrate with IDEs and linters.
+
+#+begin_src rust
+use fyaml::Document;
+
+let result = Document::parse_str("[unclosed bracket");
+if let Err(e) = result {
+    // Access structured error info
+    if let fyaml::Error::ParseError(parse_err) = &e {
+        println!("Error: {}", parse_err.message());
+        if let Some((line, col)) = parse_err.location() {
+            println!("At line {}, column {}", line, col);
+        }
+    }
+    // Or just display it nicely
+    println!("{}", e);  // "Parse error at 2:1: flow sequence without a closing bracket"
+}
+#+end_src
+
+The =ParseError= type provides:
+
+- =message()= - The error message from libfyaml
+- =line()= - Line number (1-based), if available
+- =column()= - Column number (1-based), if available
+- =location()= - Tuple of (line, column) if both available
+
+All parsing methods (=Document::parse_str=, =Document::from_string=,
+=Document::from_bytes=, =Editor::build_from_yaml=) capture errors silently
+without printing to stderr, making the library suitable for use in GUI
+applications and test suites.
+
 ** Zero-Copy Architecture
 
 ~fyaml~ leverages libfyaml's zero-copy design for efficient memory usage.
@@ -427,6 +461,7 @@ assert!(value.is_scalar());
 | ~Value~             | Owned serde-compatible YAML value                   |
 | ~Number~            | Numeric value: ~Int(i64)~, ~UInt(u64)~, ~Float(f64)~ |
 | ~TaggedValue~       | Value with an associated YAML tag                   |
+| ~ParseError~        | Rich parse error with line/column location          |
 
 *** Enums
 

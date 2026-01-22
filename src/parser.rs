@@ -9,6 +9,7 @@
 //! outlives its documents, preventing use-after-free.
 
 use crate::config;
+use crate::diag::Diag;
 use crate::document::{Document, InputOwnership};
 use crate::error::{Error, Result};
 use crate::ffi_util::malloc_copy;
@@ -16,7 +17,7 @@ use fyaml_sys::*;
 use libc::{c_void, setvbuf, _IOLBF};
 use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 use std::rc::Rc;
 
 // =============================================================================
@@ -26,21 +27,29 @@ use std::rc::Rc;
 /// Internal parser state kept alive by documents parsed from it.
 ///
 /// This ensures the input buffer remains valid while any document exists.
+/// Also owns the diagnostic handler to suppress stderr output and capture errors.
 pub(crate) struct ParserInner {
     parser_ptr: *mut fy_parser,
+    /// Diagnostic handler that captures errors silently (must outlive parser)
+    diag: Option<Diag>,
     /// Marker to ensure !Send + !Sync
     _marker: PhantomData<*mut ()>,
 }
 
 impl ParserInner {
     fn new() -> Result<Self> {
-        let cfg = config::stream_parse_cfg();
+        // Create diagnostic handler to suppress stderr output and capture errors
+        let diag = Diag::new();
+        let diag_ptr = diag.as_ref().map(|d| d.as_ptr()).unwrap_or(ptr::null_mut());
+
+        let cfg = config::stream_parse_cfg_with_diag(diag_ptr);
         let parser_ptr = unsafe { fy_parser_create(&cfg) };
         if parser_ptr.is_null() {
             return Err(Error::Ffi("fy_parser_create returned null"));
         }
         Ok(ParserInner {
             parser_ptr,
+            diag,
             _marker: PhantomData,
         })
     }
@@ -49,12 +58,21 @@ impl ParserInner {
     pub(crate) fn as_ptr(&self) -> *mut fy_parser {
         self.parser_ptr
     }
+
+    /// Returns the first collected error as an Error, or a fallback if no errors collected.
+    pub(crate) fn first_error_or(&self, fallback_msg: &'static str) -> Error {
+        self.diag
+            .as_ref()
+            .map(|d| d.first_error_or(fallback_msg))
+            .unwrap_or(Error::Parse(fallback_msg))
+    }
 }
 
 impl Drop for ParserInner {
     fn drop(&mut self) {
         if !self.parser_ptr.is_null() {
             log::trace!("Freeing ParserInner {:p}", self.parser_ptr);
+            // Parser must be destroyed before diag (diag is dropped after this)
             unsafe { fy_parser_destroy(self.parser_ptr) };
         }
     }
@@ -233,7 +251,8 @@ impl Iterator for DocumentIterator {
             // Check if null is due to parse error vs. clean end of stream
             let has_error = unsafe { fy_parser_get_stream_error(self.inner.as_ptr()) };
             if has_error {
-                return Some(Err(Error::Parse("stream parse error")));
+                // Return rich error with line/column info from diagnostic
+                return Some(Err(self.inner.first_error_or("stream parse error")));
             }
             return None;
         }

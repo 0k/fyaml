@@ -5,35 +5,42 @@
 use fyaml_sys::*;
 use std::ptr;
 
-/// Creates a parse configuration for single-document parsing.
+/// Creates a parse configuration for single-document parsing with diagnostic capture.
 ///
 /// Enables:
+/// - `FYPCF_QUIET`: Suppress stderr output
 /// - `FYPCF_PARSE_COMMENTS`: Preserve comments for roundtrip
+///
+/// The diag pointer allows capturing parse errors with location information.
 #[inline]
-pub fn document_parse_cfg() -> fy_parse_cfg {
+pub fn document_parse_cfg_with_diag(diag: *mut fy_diag) -> fy_parse_cfg {
     fy_parse_cfg {
         search_path: ptr::null_mut(),
         userdata: ptr::null_mut(),
-        diag: ptr::null_mut(),
-        flags: FYPCF_PARSE_COMMENTS,
+        diag,
+        flags: FYPCF_QUIET | FYPCF_PARSE_COMMENTS,
     }
 }
 
-/// Creates a parse configuration for stream/multi-document parsing.
+/// Creates a parse configuration for stream/multi-document parsing with diagnostic capture.
 ///
 /// Enables:
+/// - `FYPCF_QUIET`: Suppress stderr output (always enabled for no-stderr guarantee)
 /// - `FYPCF_DISABLE_BUFFERING`: Don't buffer input
-/// - `FYPCF_QUIET`: Suppress diagnostic output
 /// - `FYPCF_RESOLVE_DOCUMENT`: Resolve document after parsing
 /// - `FYPCF_PARSE_COMMENTS`: Preserve comments for roundtrip
+///
+/// The diag pointer allows capturing parse errors with location information.
+/// FYPCF_QUIET is always enabled to guarantee no stderr output, regardless of
+/// whether a custom diag is provided.
 #[inline]
-pub fn stream_parse_cfg() -> fy_parse_cfg {
+pub fn stream_parse_cfg_with_diag(diag: *mut fy_diag) -> fy_parse_cfg {
     fy_parse_cfg {
         search_path: ptr::null_mut(),
         userdata: ptr::null_mut(),
-        diag: ptr::null_mut(),
-        flags: FYPCF_DISABLE_BUFFERING
-            | FYPCF_QUIET
+        diag,
+        flags: FYPCF_QUIET
+            | FYPCF_DISABLE_BUFFERING
             | FYPCF_RESOLVE_DOCUMENT
             | FYPCF_PARSE_COMMENTS,
     }

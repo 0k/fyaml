@@ -1160,6 +1160,60 @@ fn editor_build_from_yaml_invalid_yaml_no_leak() {
     }
 }
 
+/// Tests that build_from_yaml restores document state after failure.
+/// This verifies the diag swap pattern doesn't corrupt the document.
+#[test]
+fn editor_build_from_yaml_restores_state_after_failure() {
+    let mut doc = Document::parse_str("existing: value").unwrap();
+
+    // Build something invalid - should fail but not corrupt document
+    {
+        let mut ed = doc.edit();
+        let result = ed.build_from_yaml("[invalid");
+        assert!(result.is_err());
+    }
+
+    // Document should still be usable
+    let root = doc.root().unwrap();
+    assert_eq!(
+        root.at_path("/existing").unwrap().scalar_str().unwrap(),
+        "value"
+    );
+
+    // Should be able to do a successful edit after failed one
+    {
+        let mut ed = doc.edit();
+        let node = ed.build_from_yaml("new: data").unwrap();
+        ed.set_yaml_at("/added", "works").unwrap();
+        // Don't insert `node` - just verify we can build again
+        drop(node);
+    }
+
+    let root = doc.root().unwrap();
+    assert_eq!(
+        root.at_path("/added").unwrap().scalar_str().unwrap(),
+        "works"
+    );
+}
+
+/// Tests that build_from_yaml error includes location info.
+#[test]
+fn editor_build_from_yaml_error_has_location() {
+    let mut doc = Document::new().unwrap();
+
+    let mut ed = doc.edit();
+    let result = ed.build_from_yaml("key: value\n[invalid");
+
+    match result {
+        Err(fyaml::Error::ParseError(pe)) => {
+            // Should have location info (error is on line 2)
+            assert!(pe.line().is_some(), "Editor parse error should have line");
+        }
+        Err(other) => panic!("Expected ParseError, got {:?}", other),
+        Ok(_) => panic!("Expected parse error for invalid YAML"),
+    }
+}
+
 /// Tests that RawNodeHandle properly frees nodes when dropped without insertion.
 #[test]
 fn editor_raw_node_handle_dropped_without_insert() {
@@ -1224,6 +1278,61 @@ fn stream_parse_error_returns_err() {
     // Should have at least one result that is an error
     assert!(!results.is_empty());
     assert!(results.iter().any(|r| r.is_err()));
+}
+
+/// Tests that stream parse errors contain rich location info (line/column).
+#[test]
+fn stream_parse_error_has_location() {
+    let parser = FyParser::from_string("[unclosed").unwrap();
+    let results: Vec<_> = parser.doc_iter().collect();
+
+    // Find the error
+    let err = results
+        .into_iter()
+        .find(|r| r.is_err())
+        .unwrap()
+        .unwrap_err();
+
+    // Should be a ParseError variant with location info
+    match err {
+        fyaml::Error::ParseError(pe) => {
+            // Should have line/column information
+            assert!(
+                pe.line().is_some(),
+                "Stream parse error should have line number"
+            );
+            assert!(
+                pe.column().is_some(),
+                "Stream parse error should have column number"
+            );
+            // Message should be descriptive
+            assert!(
+                !pe.message().is_empty(),
+                "Stream parse error should have a message"
+            );
+        }
+        other => panic!("Expected ParseError variant, got: {:?}", other),
+    }
+}
+
+/// Tests that stream parse error on later lines reports correct location.
+#[test]
+fn stream_parse_error_multiline_location() {
+    // The error is on line 3
+    let yaml = "---\nkey: value\n[unclosed";
+    let parser = FyParser::from_string(yaml).unwrap();
+    let results: Vec<_> = parser.doc_iter().collect();
+
+    // Find the error
+    let err = results.into_iter().find(|r| r.is_err());
+    assert!(err.is_some(), "Should have produced a parse error");
+
+    let err = err.unwrap().unwrap_err();
+    if let fyaml::Error::ParseError(pe) = err {
+        // The error should be on line 3 (or possibly 2 depending on how libfyaml counts)
+        let line = pe.line().expect("Should have line number");
+        assert!(line >= 2, "Error line should be >= 2, got: {}", line);
+    }
 }
 
 /// Tests that parse errors can be distinguished from clean EOF.

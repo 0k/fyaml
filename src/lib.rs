@@ -1,6 +1,7 @@
 #![doc = include_str!(concat!(env!("OUT_DIR"), "/README.md"))]
 
 mod config;
+mod diag;
 pub mod error;
 mod ffi_util;
 mod node;
@@ -25,7 +26,7 @@ pub use parser::{DocumentIterator, FyParser};
 pub use value_ref::ValueRef;
 
 // Re-export error and value types
-pub use error::{Error, Result};
+pub use error::{Error, ParseError, Result};
 pub use value::{Number, TaggedValue, Value};
 
 /// Returns the version string of the underlying libfyaml C library.

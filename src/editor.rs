@@ -1,12 +1,44 @@
 //! Exclusive mutation API for documents.
 
+use crate::diag::{diag_error, Diag};
 use crate::document::Document;
 use crate::error::{Error, Result};
 use crate::ffi_util::malloc_copy;
 use crate::node_ref::NodeRef;
 use fyaml_sys::*;
 
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
+
+// =============================================================================
+// DiagGuard - RAII guard for temporary diag swap
+// =============================================================================
+
+/// RAII guard that restores the original diag on drop.
+///
+/// This ensures the document's diag is restored even if there's a panic
+/// or early return during node building.
+struct DiagGuard {
+    doc_ptr: *mut fy_document,
+    original_diag: *mut fy_diag,
+}
+
+impl DiagGuard {
+    /// Creates a guard that will restore `original_diag` to `doc_ptr` on drop.
+    fn new(doc_ptr: *mut fy_document, original_diag: *mut fy_diag) -> Self {
+        Self {
+            doc_ptr,
+            original_diag,
+        }
+    }
+}
+
+impl Drop for DiagGuard {
+    fn drop(&mut self) {
+        // Restore original diag - safe even if doc_ptr is valid (which it must be
+        // since Editor holds &mut Document)
+        unsafe { fy_document_set_diag(self.doc_ptr, self.original_diag) };
+    }
+}
 
 // =============================================================================
 // RawNodeHandle
@@ -369,10 +401,29 @@ impl<'doc> Editor<'doc> {
     /// Use [`set_root`](Self::set_root) or other methods to insert it.
     ///
     /// Original formatting (including quotes) is preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ParseError`] with line and column information if parsing fails.
     pub fn build_from_yaml(&mut self, yaml: &str) -> Result<RawNodeHandle> {
         let buffer = unsafe { malloc_copy(yaml.as_bytes())? };
+
+        // Create diagnostic handler to capture errors
+        let diag = Diag::new();
+        let diag_ptr = diag.as_ref().map(|d| d.as_ptr()).unwrap_or(ptr::null_mut());
+
+        // Save original diag and set our capture diag with RAII guard for restoration
+        let original_diag = unsafe { fy_document_get_diag(self.doc_ptr()) };
+        let _guard = DiagGuard::new(self.doc_ptr(), original_diag);
+        if !diag_ptr.is_null() {
+            unsafe { fy_document_set_diag(self.doc_ptr(), diag_ptr) };
+        }
+
         let node_ptr =
             unsafe { fy_node_build_from_malloc_string(self.doc_ptr(), buffer, yaml.len()) };
+
+        // Guard will restore original diag on drop (including early returns and panics)
+
         if node_ptr.is_null() {
             // Note: fy_node_build_from_malloc_string creates an internal parser that takes
             // ownership of the buffer via fy_parser_set_malloc_string. Once registered,
@@ -386,7 +437,7 @@ impl<'doc> Editor<'doc> {
             // and WILL be freed by libfyaml.
             //
             // VERIFIED: Freeing here causes double-free (detected in tests).
-            return Err(Error::Parse("fy_node_build_from_malloc_string failed"));
+            return Err(diag_error(diag, "fy_node_build_from_malloc_string failed"));
         }
         // On success, libfyaml takes ownership of buffer (freed when document is destroyed)
         Ok(RawNodeHandle {

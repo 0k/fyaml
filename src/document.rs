@@ -1,6 +1,7 @@
 //! Document type that owns parsed YAML data.
 
 use crate::config;
+use crate::diag::{diag_error, Diag};
 use crate::editor::Editor;
 use crate::error::{Error, Result};
 use crate::ffi_util::{malloc_copy, take_c_string};
@@ -152,6 +153,10 @@ impl Document {
     /// ownership of. This ensures zero-copy node access is safe even after
     /// the original string is dropped.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ParseError`] with line and column information if parsing fails.
+    ///
     /// # Example
     ///
     /// ```
@@ -169,13 +174,20 @@ impl Document {
         // Allocate buffer and copy input - libfyaml takes ownership
         let buf = unsafe { malloc_copy(s.as_bytes())? };
 
+        // Create diagnostic handler to capture errors
+        let diag = Diag::new();
+        let diag_ptr = diag.as_ref().map(|d| d.as_ptr()).unwrap_or(ptr::null_mut());
+
         // libfyaml takes ownership of buf on success
-        let cfg = config::document_parse_cfg();
+        let cfg = config::document_parse_cfg_with_diag(diag_ptr);
         let doc_ptr = unsafe { fy_document_build_from_malloc_string(&cfg, buf, s.len()) };
         if doc_ptr.is_null() {
             // On failure, libfyaml does NOT free the buffer
             unsafe { libc::free(buf as *mut c_void) };
-            return Err(Error::Parse("fy_document_build_from_malloc_string failed"));
+            return Err(diag_error(
+                diag,
+                "fy_document_build_from_malloc_string failed",
+            ));
         }
 
         Ok(Document {
@@ -193,6 +205,10 @@ impl Document {
     ///
     /// Use this when you already own the input and want to minimize allocations.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ParseError`] with line and column information if parsing fails.
+    ///
     /// # Example
     ///
     /// ```
@@ -208,13 +224,17 @@ impl Document {
             return Err(Error::Parse("empty input"));
         }
 
-        let cfg = config::document_parse_cfg();
+        // Create diagnostic handler to capture errors
+        let diag = Diag::new();
+        let diag_ptr = diag.as_ref().map(|d| d.as_ptr()).unwrap_or(ptr::null_mut());
+
+        let cfg = config::document_parse_cfg_with_diag(diag_ptr);
         // SAFETY: fy_document_build_from_string borrows the input - the String must
         // remain valid for the document's lifetime. We keep it in InputOwnership::OwnedString.
         let doc_ptr =
             unsafe { fy_document_build_from_string(&cfg, s.as_ptr() as *const i8, s.len()) };
         if doc_ptr.is_null() {
-            return Err(Error::Parse("fy_document_build_from_string failed"));
+            return Err(diag_error(diag, "fy_document_build_from_string failed"));
         }
 
         Ok(Document {
@@ -241,6 +261,10 @@ impl Document {
     /// regardless. Invalid UTF-8 sequences may cause parsing errors or be
     /// preserved as raw bytes accessible via `scalar_bytes()`.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ParseError`] with line and column information if parsing fails.
+    ///
     /// # Example
     ///
     /// ```
@@ -257,14 +281,18 @@ impl Document {
             return Err(Error::Parse("empty input"));
         }
 
-        let cfg = config::document_parse_cfg();
+        // Create diagnostic handler to capture errors
+        let diag = Diag::new();
+        let diag_ptr = diag.as_ref().map(|d| d.as_ptr()).unwrap_or(ptr::null_mut());
+
+        let cfg = config::document_parse_cfg_with_diag(diag_ptr);
         // SAFETY: fy_document_build_from_string borrows the input - the Vec must
         // remain valid for the document's lifetime. We keep it in InputOwnership::OwnedBytes.
         let doc_ptr = unsafe {
             fy_document_build_from_string(&cfg, bytes.as_ptr() as *const i8, bytes.len())
         };
         if doc_ptr.is_null() {
-            return Err(Error::Parse("fy_document_build_from_string failed"));
+            return Err(diag_error(diag, "fy_document_build_from_string failed"));
         }
 
         Ok(Document {
