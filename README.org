@@ -144,6 +144,41 @@ assert!(output.contains("script: |"));
 - Flow collections (~[a, b]~, ~{a: 1}~) are preserved as flow style but may be
   reformatted across multiple lines by libfyaml's emitter
 
+** Path Syntax
+
+Paths use ~/~ as the separator (YPATH/JSON Pointer style):
+
+- ~/key~ - access a mapping key
+- ~/0~ - access a sequence index
+- ~/parent/child/0~ - nested access
+
+#+begin_src rust
+use fyaml::Document;
+
+let yaml = "
+database:
+  host: localhost
+  ports:
+    - 5432
+    - 5433
+";
+
+let doc = Document::parse_str(yaml).unwrap();
+let root = doc.root().unwrap();
+
+// Access mapping key
+let db = root.at_path("/database").unwrap();
+assert!(db.is_mapping());
+
+// Nested access
+let host = root.at_path("/database/host").unwrap();
+assert_eq!(host.scalar_str().unwrap(), "localhost");
+
+// Sequence index
+let first_port = root.at_path("/database/ports/0").unwrap();
+assert_eq!(first_port.scalar_str().unwrap(), "5432");
+#+end_src
+
 ** Installation
 
 Add to your ~Cargo.toml~:
@@ -285,7 +320,7 @@ assert_eq!(docs[1].at_path("/doc2").unwrap().scalar_str().unwrap(), "value2");
 
 For CLI tools that read YAML from stdin:
 
-#+begin_src rust
+#+begin_src rust :no_run yes
 use fyaml::Document;
 
 // Single document from stdin
@@ -295,7 +330,7 @@ println!("{}", doc.emit().unwrap());
 
 For multi-document streams:
 
-#+begin_src rust
+#+begin_src rust :no_run yes
 use fyaml::FyParser;
 
 // Default: line-buffered mode for interactive/streaming use
@@ -309,7 +344,7 @@ for doc_result in parser.doc_iter() {
 
 For batch processing where efficiency matters more than interactivity:
 
-#+begin_src rust
+#+begin_src rust :no_run yes
 use fyaml::FyParser;
 
 // Block-buffered mode: more efficient for large inputs
@@ -551,4 +586,4 @@ assert!(value.is_scalar());
 
 ** License
 
-This project is licensed under the MIT License - see the [[file:LICENSE][LICENSE]] file for details.
+MIT License (c) 2024-2026 Valentin Lab. The LICENSE file is available with the source.

@@ -3,6 +3,7 @@ name = "fyaml"
 version = "%%version%%"
 edition = "2021"
 authors = ["Valentin Lab <valentin.lab@kalysto.org>"]
+build = "build.rs"
 description = "Safe Rust bindings for libfyaml YAML parser with DOM navigation, path queries, and serde-compatible Value type"
 license = "MIT"
 repository = "https://github.com/0k/fyaml"
