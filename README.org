@@ -1,3 +1,5 @@
+#+OPTIONS: ^:nil
+
 * fyaml
 
 A safe Rust wrapper around the ~libfyaml~ C library for parsing and
