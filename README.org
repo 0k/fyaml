@@ -215,15 +215,6 @@ let first_port = root.at_path("/database/ports/0").unwrap();
 assert_eq!(first_port.scalar_str().unwrap(), "5432");
 #+end_src
 
-** Installation
-
-Add to your ~Cargo.toml~:
-
-#+begin_src toml
-[dependencies]
-fyaml = "0.3"
-#+end_src
-
 ** Usage
 
 *** Working with Value (high-level, owned)
