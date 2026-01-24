@@ -237,12 +237,20 @@ impl<'doc> Editor<'doc> {
     /// Sets a value at the given path from a YAML snippet.
     ///
     /// If the path exists, the value is replaced.
-    /// If the path doesn't exist, it will be created (for simple cases).
+    /// If the path doesn't exist, it will be created (for mappings only).
     ///
     /// The YAML snippet is parsed and its formatting (including quotes) is preserved.
     ///
-    /// # Example
+    /// # Supported Parent Types
     ///
+    /// - **Mappings**: Use string keys (e.g., `/config/host`). New keys are created if missing.
+    /// - **Sequences**: Use integer indices (e.g., `/items/0`, `/items/-1`).
+    ///   Negative indices count from the end (Python-style).
+    ///   Index must be within bounds (cannot append via `set_yaml_at`).
+    ///
+    /// # Examples
+    ///
+    /// Setting a mapping value:
     /// ```
     /// use fyaml::Document;
     ///
@@ -254,6 +262,20 @@ impl<'doc> Editor<'doc> {
     /// }
     /// let output = doc.emit().unwrap();
     /// assert!(output.contains("'Bob'"));
+    /// ```
+    ///
+    /// Setting a sequence element:
+    /// ```
+    /// use fyaml::Document;
+    ///
+    /// let mut doc = Document::parse_str("items:\n  - a\n  - b\n  - c").unwrap();
+    /// {
+    ///     let mut ed = doc.edit();
+    ///     ed.set_yaml_at("/items/1", "replaced").unwrap();
+    ///     ed.set_yaml_at("/items/-1", "last").unwrap();  // negative index
+    /// }
+    /// assert_eq!(doc.at_path("/items/1").unwrap().scalar_str().unwrap(), "replaced");
+    /// assert_eq!(doc.at_path("/items/2").unwrap().scalar_str().unwrap(), "last");
     /// ```
     pub fn set_yaml_at(&mut self, path: &str, yaml: &str) -> Result<()> {
         // Build the new node
@@ -274,39 +296,93 @@ impl<'doc> Editor<'doc> {
         // Get or navigate to parent
         let parent_ptr = self.resolve_parent(parent_path)?;
 
-        // Check if it's a mapping
+        // Check parent type and handle accordingly
         let parent_type = unsafe { fy_node_get_type(parent_ptr) };
-        if parent_type != FYNT_MAPPING {
-            return Err(Error::TypeMismatch {
-                expected: "mapping",
-                got: "non-mapping parent",
-            });
-        }
 
-        // Look up existing pair
-        let pair_ptr = unsafe {
-            fy_node_mapping_lookup_pair_by_string(parent_ptr, key.as_ptr() as *const i8, key.len())
-        };
+        if parent_type == FYNT_MAPPING {
+            // Look up existing pair
+            let pair_ptr = unsafe {
+                fy_node_mapping_lookup_pair_by_string(
+                    parent_ptr,
+                    key.as_ptr() as *const i8,
+                    key.len(),
+                )
+            };
 
-        if !pair_ptr.is_null() {
-            // Update existing pair's value
-            let ret = unsafe { fy_node_pair_set_value(pair_ptr, new_node.as_ptr()) };
-            if ret != 0 {
-                return Err(Error::Ffi("fy_node_pair_set_value failed"));
+            if !pair_ptr.is_null() {
+                // Update existing pair's value
+                let ret = unsafe { fy_node_pair_set_value(pair_ptr, new_node.as_ptr()) };
+                if ret != 0 {
+                    return Err(Error::Ffi("fy_node_pair_set_value failed"));
+                }
+            } else {
+                // Create new key and append
+                let key_ptr = unsafe {
+                    fy_node_create_scalar_copy(self.doc_ptr(), key.as_ptr() as *const i8, key.len())
+                };
+                if key_ptr.is_null() {
+                    return Err(Error::Ffi("fy_node_create_scalar_copy failed"));
+                }
+                let ret = unsafe { fy_node_mapping_append(parent_ptr, key_ptr, new_node.as_ptr()) };
+                if ret != 0 {
+                    unsafe { fy_node_free(key_ptr) };
+                    return Err(Error::Ffi("fy_node_mapping_append failed"));
+                }
+            }
+        } else if parent_type == FYNT_SEQUENCE {
+            // Parse key as index (supports negative indices like Python)
+            let index: i32 = key
+                .parse()
+                .map_err(|_| Error::Ffi("invalid sequence index"))?;
+
+            let count = unsafe { fy_node_sequence_item_count(parent_ptr) };
+
+            // Resolve negative index
+            let resolved_index = if index < 0 { count + index } else { index };
+
+            if resolved_index < 0 || resolved_index >= count {
+                return Err(Error::Ffi("sequence index out of bounds"));
+            }
+
+            // Get the item at the target index
+            let old_item = unsafe { fy_node_sequence_get_by_index(parent_ptr, resolved_index) };
+            if old_item.is_null() {
+                return Err(Error::Ffi("sequence element not found"));
+            }
+
+            // Get the next item BEFORE removing (indices will shift after removal)
+            let next_item =
+                unsafe { fy_node_sequence_get_by_index(parent_ptr, resolved_index + 1) };
+
+            // Remove the old item
+            let removed = unsafe { fy_node_sequence_remove(parent_ptr, old_item) };
+            if removed.is_null() {
+                return Err(Error::Ffi("fy_node_sequence_remove failed"));
+            }
+            // Free the detached node
+            unsafe { fy_node_free(removed) };
+
+            // Insert new item at the same position
+            if next_item.is_null() {
+                // Was the last item, append
+                let ret = unsafe { fy_node_sequence_append(parent_ptr, new_node.as_ptr()) };
+                if ret != 0 {
+                    return Err(Error::Ffi("fy_node_sequence_append failed"));
+                }
+            } else {
+                // Insert before the next item
+                let ret = unsafe {
+                    fy_node_sequence_insert_before(parent_ptr, next_item, new_node.as_ptr())
+                };
+                if ret != 0 {
+                    return Err(Error::Ffi("fy_node_sequence_insert_before failed"));
+                }
             }
         } else {
-            // Create new key and append
-            let key_ptr = unsafe {
-                fy_node_create_scalar_copy(self.doc_ptr(), key.as_ptr() as *const i8, key.len())
-            };
-            if key_ptr.is_null() {
-                return Err(Error::Ffi("fy_node_create_scalar_copy failed"));
-            }
-            let ret = unsafe { fy_node_mapping_append(parent_ptr, key_ptr, new_node.as_ptr()) };
-            if ret != 0 {
-                unsafe { fy_node_free(key_ptr) };
-                return Err(Error::Ffi("fy_node_mapping_append failed"));
-            }
+            return Err(Error::TypeMismatch {
+                expected: "mapping or sequence",
+                got: "scalar",
+            });
         }
 
         // Mark as inserted so Drop doesn't free it
@@ -640,5 +716,129 @@ mod tests {
         }
         let output = doc.emit().unwrap();
         assert!(output.contains("'quoted'"));
+    }
+
+    #[test]
+    fn test_set_yaml_at_sequence_first() {
+        let mut doc = Document::parse_str("items:\n  - a\n  - b\n  - c").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_yaml_at("/items/0", "'replaced'").unwrap();
+        }
+        assert_eq!(
+            doc.at_path("/items/0").unwrap().scalar_str().unwrap(),
+            "replaced"
+        );
+        assert_eq!(doc.at_path("/items/1").unwrap().scalar_str().unwrap(), "b");
+        assert_eq!(doc.at_path("/items/2").unwrap().scalar_str().unwrap(), "c");
+    }
+
+    #[test]
+    fn test_set_yaml_at_sequence_middle() {
+        let mut doc = Document::parse_str("items:\n  - a\n  - b\n  - c").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_yaml_at("/items/1", "replaced").unwrap();
+        }
+        assert_eq!(doc.at_path("/items/0").unwrap().scalar_str().unwrap(), "a");
+        assert_eq!(
+            doc.at_path("/items/1").unwrap().scalar_str().unwrap(),
+            "replaced"
+        );
+        assert_eq!(doc.at_path("/items/2").unwrap().scalar_str().unwrap(), "c");
+    }
+
+    #[test]
+    fn test_set_yaml_at_sequence_last() {
+        let mut doc = Document::parse_str("items:\n  - a\n  - b\n  - c").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_yaml_at("/items/2", "replaced").unwrap();
+        }
+        assert_eq!(doc.at_path("/items/0").unwrap().scalar_str().unwrap(), "a");
+        assert_eq!(doc.at_path("/items/1").unwrap().scalar_str().unwrap(), "b");
+        assert_eq!(
+            doc.at_path("/items/2").unwrap().scalar_str().unwrap(),
+            "replaced"
+        );
+    }
+
+    #[test]
+    fn test_set_yaml_at_sequence_negative_index() {
+        let mut doc = Document::parse_str("items:\n  - a\n  - b\n  - c").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_yaml_at("/items/-1", "last").unwrap();
+        }
+        assert_eq!(doc.at_path("/items/0").unwrap().scalar_str().unwrap(), "a");
+        assert_eq!(doc.at_path("/items/1").unwrap().scalar_str().unwrap(), "b");
+        assert_eq!(
+            doc.at_path("/items/2").unwrap().scalar_str().unwrap(),
+            "last"
+        );
+    }
+
+    #[test]
+    fn test_set_yaml_at_sequence_negative_first() {
+        let mut doc = Document::parse_str("items:\n  - a\n  - b\n  - c").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_yaml_at("/items/-3", "first").unwrap();
+        }
+        assert_eq!(
+            doc.at_path("/items/0").unwrap().scalar_str().unwrap(),
+            "first"
+        );
+        assert_eq!(doc.at_path("/items/1").unwrap().scalar_str().unwrap(), "b");
+        assert_eq!(doc.at_path("/items/2").unwrap().scalar_str().unwrap(), "c");
+    }
+
+    #[test]
+    fn test_set_yaml_at_sequence_out_of_bounds() {
+        let mut doc = Document::parse_str("items:\n  - a\n  - b").unwrap();
+        {
+            let mut ed = doc.edit();
+            let result = ed.set_yaml_at("/items/5", "oob");
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_set_yaml_at_sequence_negative_out_of_bounds() {
+        let mut doc = Document::parse_str("items:\n  - a\n  - b").unwrap();
+        {
+            let mut ed = doc.edit();
+            let result = ed.set_yaml_at("/items/-5", "oob");
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_set_yaml_at_sequence_complex_value() {
+        let mut doc = Document::parse_str("items:\n  - simple").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_yaml_at("/items/0", "key: value").unwrap();
+        }
+        let item = doc.at_path("/items/0").unwrap();
+        assert!(item.is_mapping());
+        assert_eq!(item.map_get("key").unwrap().scalar_str().unwrap(), "value");
+    }
+
+    #[test]
+    fn test_set_yaml_at_nested_in_sequence() {
+        let mut doc = Document::parse_str("items:\n  - name: alice\n  - name: bob").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_yaml_at("/items/0/name", "charlie").unwrap();
+        }
+        assert_eq!(
+            doc.at_path("/items/0/name").unwrap().scalar_str().unwrap(),
+            "charlie"
+        );
+        assert_eq!(
+            doc.at_path("/items/1/name").unwrap().scalar_str().unwrap(),
+            "bob"
+        );
     }
 }

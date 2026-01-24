@@ -334,6 +334,24 @@ let mut doc = Document::new().unwrap();
 assert!(doc.root().is_some());
 #+end_src
 
+Modifying sequence elements:
+
+#+begin_src rust
+use fyaml::Document;
+
+let mut doc = Document::parse_str("items:\n  - a\n  - b\n  - c").unwrap();
+{
+    let mut ed = doc.edit();
+    // Replace by positive index
+    ed.set_yaml_at("/items/0", "first").unwrap();
+    // Replace by negative index (Python-style: -1 = last element)
+    ed.set_yaml_at("/items/-1", "last").unwrap();
+}
+assert_eq!(doc.at_path("/items/0").unwrap().scalar_str().unwrap(), "first");
+assert_eq!(doc.at_path("/items/1").unwrap().scalar_str().unwrap(), "b");
+assert_eq!(doc.at_path("/items/2").unwrap().scalar_str().unwrap(), "last");
+#+end_src
+
 *** Multi-document parsing with FyParser
 
 Use ~FyParser~ for parsing YAML streams with multiple documents:
@@ -532,7 +550,7 @@ assert!(value.is_scalar());
 
 | Method                        | Description                               |
 |-------------------------------+-------------------------------------------|
-| ~ed.set_yaml_at(path, yaml)~  | Set/replace value at path from YAML       |
+| ~ed.set_yaml_at(path, yaml)~  | Set/replace value at path (mappings and sequences) |
 | ~ed.delete_at(path)~          | Delete value at path, returns ~bool~      |
 | ~ed.build_from_yaml(yaml)~    | Build detached node from YAML             |
 | ~ed.build_scalar(value)~      | Build plain scalar node                   |
