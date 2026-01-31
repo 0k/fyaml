@@ -343,6 +343,44 @@ assert_eq!(doc.at_path("/items/1").unwrap().scalar_str().unwrap(), "b");
 assert_eq!(doc.at_path("/items/2").unwrap().scalar_str().unwrap(), "last");
 #+end_src
 
+Building structures programmatically with handle-level operations:
+
+#+begin_src rust
+use fyaml::Document;
+
+let mut doc = Document::new().unwrap();
+{
+    let mut ed = doc.edit();
+
+    // Build a sequence of servers
+    let mut servers = ed.build_sequence().unwrap();
+    let s1 = ed.build_scalar("web1").unwrap();
+    let s2 = ed.build_scalar("web2").unwrap();
+    ed.seq_append(&mut servers, s1).unwrap();
+    ed.seq_append(&mut servers, s2).unwrap();
+
+    // Build the root mapping
+    let mut root = ed.build_mapping().unwrap();
+    let k1 = ed.build_scalar("host").unwrap();
+    let v1 = ed.build_scalar("localhost").unwrap();
+    ed.map_insert(&mut root, k1, v1).unwrap();
+    let k2 = ed.build_scalar("port").unwrap();
+    let v2 = ed.build_null().unwrap();
+    ed.map_insert(&mut root, k2, v2).unwrap();
+    let k3 = ed.build_scalar("servers").unwrap();
+    ed.map_insert(&mut root, k3, servers).unwrap();
+
+    // Tag the root
+    ed.set_tag(&mut root, "!config").unwrap();
+    ed.set_root(root).unwrap();
+}
+
+let root = doc.root().unwrap();
+assert_eq!(root.at_path("/host").unwrap().scalar_str().unwrap(), "localhost");
+assert_eq!(root.tag_str().unwrap().unwrap(), "!config");
+assert_eq!(root.at_path("/servers/0").unwrap().scalar_str().unwrap(), "web1");
+#+end_src
+
 *** Multi-document parsing with FyParser
 
 Use ~FyParser~ for parsing YAML streams with multiple documents:
@@ -547,8 +585,12 @@ assert!(value.is_scalar());
 | ~ed.build_scalar(value)~      | Build plain scalar node                   |
 | ~ed.build_sequence()~         | Build empty sequence node                 |
 | ~ed.build_mapping()~          | Build empty mapping node                  |
+| ~ed.build_null()~             | Build null scalar node                    |
 | ~ed.set_root(handle)~         | Set document root                         |
 | ~ed.copy_node(node)~          | Copy node from any document               |
+| ~ed.seq_append(seq, item)~    | Append item to detached sequence handle   |
+| ~ed.map_insert(map, key, val)~ | Insert key-value pair into detached mapping |
+| ~ed.set_tag(node, tag)~       | Set YAML tag on detached node             |
 | ~ed.seq_append_at(path, item)~ | Append item to sequence at path          |
 | ~ed.root()~                   | Read root during edit session             |
 | ~ed.at_path(path)~            | Navigate during edit session              |

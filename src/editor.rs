@@ -592,7 +592,64 @@ impl<'doc> Editor<'doc> {
         })
     }
 
-    // ==================== Low-Level Sequence Operations ====================
+    // ==================== Handle-Level Node Assembly ====================
+
+    /// Appends an item to a detached sequence handle.
+    ///
+    /// The `item` handle is consumed (the sequence takes ownership).
+    /// The `seq` handle must have been created with [`build_sequence`](Self::build_sequence).
+    pub fn seq_append(&mut self, seq: &mut RawNodeHandle, mut item: RawNodeHandle) -> Result<()> {
+        let ret = unsafe { fy_node_sequence_append(seq.as_ptr(), item.as_ptr()) };
+        if ret != 0 {
+            return Err(Error::Ffi("fy_node_sequence_append failed"));
+        }
+        item.mark_inserted();
+        Ok(())
+    }
+
+    /// Inserts a key-value pair into a detached mapping handle.
+    ///
+    /// Both `key` and `value` handles are consumed (the mapping takes ownership).
+    /// The `map` handle must have been created with [`build_mapping`](Self::build_mapping).
+    pub fn map_insert(
+        &mut self,
+        map: &mut RawNodeHandle,
+        mut key: RawNodeHandle,
+        mut value: RawNodeHandle,
+    ) -> Result<()> {
+        let ret = unsafe { fy_node_mapping_append(map.as_ptr(), key.as_ptr(), value.as_ptr()) };
+        if ret != 0 {
+            return Err(Error::Ffi("fy_node_mapping_append failed"));
+        }
+        key.mark_inserted();
+        value.mark_inserted();
+        Ok(())
+    }
+
+    /// Sets a YAML tag on a detached node handle.
+    ///
+    /// For example, `set_tag(&mut node, "!custom")` produces `!custom value`.
+    pub fn set_tag(&mut self, node: &mut RawNodeHandle, tag: &str) -> Result<()> {
+        let ret = unsafe { fy_node_set_tag(node.as_ptr(), tag.as_ptr() as *const i8, tag.len()) };
+        if ret != 0 {
+            return Err(Error::Ffi("fy_node_set_tag failed"));
+        }
+        Ok(())
+    }
+
+    /// Builds a null scalar node.
+    ///
+    /// Emits as `null`, `~`, or empty depending on the emitter mode.
+    pub fn build_null(&mut self) -> Result<RawNodeHandle> {
+        let node_ptr = unsafe { fy_node_create_scalar_copy(self.doc_ptr(), ptr::null(), 0) };
+        let nn = NonNull::new(node_ptr).ok_or(Error::Ffi("fy_node_create_scalar_copy failed"))?;
+        Ok(RawNodeHandle {
+            node_ptr: nn,
+            inserted: false,
+        })
+    }
+
+    // ==================== Path-Based Sequence Operations ====================
 
     /// Appends a node to a sequence at the given path.
     ///
@@ -840,5 +897,66 @@ mod tests {
             doc.at_path("/items/1/name").unwrap().scalar_str().unwrap(),
             "bob"
         );
+    }
+
+    #[test]
+    fn test_seq_append() {
+        let mut doc = Document::new().unwrap();
+        {
+            let mut ed = doc.edit();
+            let mut seq = ed.build_sequence().unwrap();
+            let a = ed.build_scalar("a").unwrap();
+            let b = ed.build_scalar("b").unwrap();
+            ed.seq_append(&mut seq, a).unwrap();
+            ed.seq_append(&mut seq, b).unwrap();
+            ed.set_root(seq).unwrap();
+        }
+        let root = doc.root().unwrap();
+        assert!(root.is_sequence());
+        assert_eq!(root.seq_get(0).unwrap().scalar_str().unwrap(), "a");
+        assert_eq!(root.seq_get(1).unwrap().scalar_str().unwrap(), "b");
+    }
+
+    #[test]
+    fn test_map_insert() {
+        let mut doc = Document::new().unwrap();
+        {
+            let mut ed = doc.edit();
+            let mut map = ed.build_mapping().unwrap();
+            let k = ed.build_scalar("name").unwrap();
+            let v = ed.build_scalar("Alice").unwrap();
+            ed.map_insert(&mut map, k, v).unwrap();
+            ed.set_root(map).unwrap();
+        }
+        assert_eq!(doc.at_path("/name").unwrap().scalar_str().unwrap(), "Alice");
+    }
+
+    #[test]
+    fn test_set_tag() {
+        let mut doc = Document::new().unwrap();
+        {
+            let mut ed = doc.edit();
+            let mut node = ed.build_scalar("42").unwrap();
+            ed.set_tag(&mut node, "!custom").unwrap();
+            ed.set_root(node).unwrap();
+        }
+        let root = doc.root().unwrap();
+        assert_eq!(root.tag_str().unwrap().unwrap(), "!custom");
+        assert_eq!(root.scalar_str().unwrap(), "42");
+    }
+
+    #[test]
+    fn test_build_null() {
+        let mut doc = Document::new().unwrap();
+        {
+            let mut ed = doc.edit();
+            let node = ed.build_null().unwrap();
+            ed.set_root(node).unwrap();
+        }
+        let root = doc.root().unwrap();
+        assert!(root.is_scalar());
+        let emitted = root.emit().unwrap();
+        // libfyaml emits null scalars as empty string or "null"
+        assert!(emitted.is_empty() || emitted == "null");
     }
 }

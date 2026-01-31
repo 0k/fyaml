@@ -2,7 +2,8 @@
 //!
 //! Tests for editor operations at boundaries and error conditions.
 
-use fyaml::{Document, NodeStyle};
+use fyaml::Document;
+use fyaml::NodeStyle;
 
 // =============================================================================
 // Root Operations
@@ -416,4 +417,180 @@ fn editor_set_root_sequence() {
     let root = doc.root().unwrap();
     assert!(root.is_sequence());
     assert_eq!(root.seq_len().unwrap(), 3);
+}
+
+// =============================================================================
+// Handle-Level Assembly
+// =============================================================================
+
+#[test]
+fn editor_build_structure_then_mutate_with_paths() {
+    // Build a structure with handle-level API, then modify it with path-based API
+    let mut doc = Document::new().unwrap();
+    {
+        let mut ed = doc.edit();
+        let mut root = ed.build_mapping().unwrap();
+        let k = ed.build_scalar("name").unwrap();
+        let v = ed.build_scalar("Alice").unwrap();
+        ed.map_insert(&mut root, k, v).unwrap();
+        let k2 = ed.build_scalar("age").unwrap();
+        let v2 = ed.build_scalar("30").unwrap();
+        ed.map_insert(&mut root, k2, v2).unwrap();
+        ed.set_root(root).unwrap();
+    }
+    // Now use path-based mutation on the programmatically built structure
+    {
+        let mut ed = doc.edit();
+        ed.set_yaml_at("/name", "'Bob'").unwrap();
+        ed.delete_at("/age").unwrap();
+        ed.set_yaml_at("/role", "admin").unwrap();
+    }
+    assert_eq!(doc.at_path("/name").unwrap().scalar_str().unwrap(), "Bob");
+    assert!(doc.at_path("/age").is_none());
+    assert_eq!(doc.at_path("/role").unwrap().scalar_str().unwrap(), "admin");
+}
+
+#[test]
+fn editor_seq_append_then_append_at() {
+    // Build a sequence with handle-level API, then extend it with path-based API
+    let mut doc = Document::new().unwrap();
+    {
+        let mut ed = doc.edit();
+        let mut root = ed.build_mapping().unwrap();
+        let k = ed.build_scalar("items").unwrap();
+        let mut seq = ed.build_sequence().unwrap();
+        let a = ed.build_scalar("a").unwrap();
+        let b = ed.build_scalar("b").unwrap();
+        ed.seq_append(&mut seq, a).unwrap();
+        ed.seq_append(&mut seq, b).unwrap();
+        ed.map_insert(&mut root, k, seq).unwrap();
+        ed.set_root(root).unwrap();
+    }
+    {
+        let mut ed = doc.edit();
+        let c = ed.build_scalar("c").unwrap();
+        ed.seq_append_at("/items", c).unwrap();
+        ed.set_yaml_at("/items/0", "replaced").unwrap();
+    }
+    let items = doc.at_path("/items").unwrap();
+    assert_eq!(items.seq_len().unwrap(), 3);
+    assert_eq!(items.seq_get(0).unwrap().scalar_str().unwrap(), "replaced");
+    assert_eq!(items.seq_get(1).unwrap().scalar_str().unwrap(), "b");
+    assert_eq!(items.seq_get(2).unwrap().scalar_str().unwrap(), "c");
+}
+
+#[test]
+fn editor_build_with_nulls_and_tags() {
+    let mut doc = Document::new().unwrap();
+    {
+        let mut ed = doc.edit();
+        let mut root = ed.build_mapping().unwrap();
+
+        let k1 = ed.build_scalar("present").unwrap();
+        let v1 = ed.build_scalar("yes").unwrap();
+        ed.map_insert(&mut root, k1, v1).unwrap();
+
+        let k2 = ed.build_scalar("missing").unwrap();
+        let v2 = ed.build_null().unwrap();
+        ed.map_insert(&mut root, k2, v2).unwrap();
+
+        ed.set_tag(&mut root, "!mytype").unwrap();
+        ed.set_root(root).unwrap();
+    }
+    let root = doc.root().unwrap();
+    assert_eq!(root.tag_str().unwrap().unwrap(), "!mytype");
+    assert_eq!(
+        root.at_path("/present").unwrap().scalar_str().unwrap(),
+        "yes"
+    );
+    // Null node has empty scalar_str
+    let missing = root.at_path("/missing").unwrap();
+    assert!(missing.is_scalar());
+    // Replace the null with a real value via path API
+    {
+        let mut ed = doc.edit();
+        ed.set_yaml_at("/missing", "now here").unwrap();
+    }
+    assert_eq!(
+        doc.at_path("/missing").unwrap().scalar_str().unwrap(),
+        "now here"
+    );
+}
+
+#[test]
+fn editor_nested_handle_assembly() {
+    // Build a nested structure entirely with handle-level API
+    let mut doc = Document::new().unwrap();
+    {
+        let mut ed = doc.edit();
+
+        // Inner mapping: {host: localhost, port: 5432}
+        let mut db = ed.build_mapping().unwrap();
+        let k = ed.build_scalar("host").unwrap();
+        let v = ed.build_scalar("localhost").unwrap();
+        ed.map_insert(&mut db, k, v).unwrap();
+        let k = ed.build_scalar("port").unwrap();
+        let v = ed.build_scalar("5432").unwrap();
+        ed.map_insert(&mut db, k, v).unwrap();
+
+        // Sequence: [web, api]
+        let mut services = ed.build_sequence().unwrap();
+        let s1 = ed.build_scalar("web").unwrap();
+        let s2 = ed.build_scalar("api").unwrap();
+        ed.seq_append(&mut services, s1).unwrap();
+        ed.seq_append(&mut services, s2).unwrap();
+
+        // Root mapping
+        let mut root = ed.build_mapping().unwrap();
+        let k = ed.build_scalar("database").unwrap();
+        ed.map_insert(&mut root, k, db).unwrap();
+        let k = ed.build_scalar("services").unwrap();
+        ed.map_insert(&mut root, k, services).unwrap();
+
+        ed.set_root(root).unwrap();
+    }
+    assert_eq!(
+        doc.at_path("/database/host").unwrap().scalar_str().unwrap(),
+        "localhost"
+    );
+    assert_eq!(
+        doc.at_path("/services/1").unwrap().scalar_str().unwrap(),
+        "api"
+    );
+
+    // Emit and reparse to verify structural integrity
+    let yaml = doc.emit().unwrap();
+    let reparsed = Document::parse_str(&yaml).unwrap();
+    assert_eq!(
+        reparsed
+            .at_path("/database/port")
+            .unwrap()
+            .scalar_str()
+            .unwrap(),
+        "5432"
+    );
+    assert_eq!(
+        reparsed
+            .at_path("/services/0")
+            .unwrap()
+            .scalar_str()
+            .unwrap(),
+        "web"
+    );
+}
+
+#[test]
+fn editor_copy_then_tag_and_insert() {
+    // Copy a node from one document, tag it, and insert into another
+    let src = Document::parse_str("template:\n  x: 1\n  y: 2").unwrap();
+    let mut dest = Document::new().unwrap();
+    {
+        let mut ed = dest.edit();
+        let mut copied = ed.copy_node(src.at_path("/template").unwrap()).unwrap();
+        ed.set_tag(&mut copied, "!copied").unwrap();
+        ed.set_root(copied).unwrap();
+    }
+    let root = dest.root().unwrap();
+    assert_eq!(root.tag_str().unwrap().unwrap(), "!copied");
+    assert_eq!(root.at_path("/x").unwrap().scalar_str().unwrap(), "1");
 }
