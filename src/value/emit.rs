@@ -111,11 +111,7 @@ mod tests {
     fn test_emit_null() {
         let value = Value::Null;
         let yaml = value.to_yaml_string().unwrap();
-        assert!(
-            yaml.is_empty() || yaml == "null" || yaml == "~",
-            "Null to_yaml_string() should be exact (no trailing newline), got: {:?}",
-            yaml
-        );
+        assert_eq!(yaml, "null");
     }
 
     #[test]

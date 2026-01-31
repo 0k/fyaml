@@ -18,12 +18,16 @@ use indexmap::IndexMap;
 fn value_to_yaml_string_null() {
     let value = Value::Null;
     let yaml = value.to_yaml_string().unwrap();
+    assert_eq!(yaml, "null");
+}
 
-    // Null should emit as empty or explicit null, no trailing newline
-    assert!(
-        yaml.is_empty() || yaml == "null" || yaml == "~",
-        "Null to_yaml_string() should be exact (no trailing newline), got: {:?}",
-        yaml
+#[test]
+fn value_to_yaml_string_null_vs_empty_string() {
+    let null_yaml = Value::Null.to_yaml_string().unwrap();
+    let empty_yaml = Value::String(String::new()).to_yaml_string().unwrap();
+    assert_ne!(
+        null_yaml, empty_yaml,
+        "Value::Null and Value::String(\"\") must emit differently"
     );
 }
 
