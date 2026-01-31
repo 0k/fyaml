@@ -19,8 +19,12 @@ fn value_to_yaml_string_null() {
     let value = Value::Null;
     let yaml = value.to_yaml_string().unwrap();
 
-    // Null should emit as empty or explicit null
-    assert!(yaml.trim().is_empty() || yaml.contains("null") || yaml.contains("~"));
+    // Null should emit as empty or explicit null, no trailing newline
+    assert!(
+        yaml.is_empty() || yaml == "null" || yaml == "~",
+        "Null to_yaml_string() should be exact (no trailing newline), got: {:?}",
+        yaml
+    );
 }
 
 #[test]

@@ -1,18 +1,19 @@
 //! YAML emission for Value using libfyaml.
+//!
+//! Converts owned `Value` trees to YAML strings via the safe `Editor` API.
+//! No direct FFI calls — all node building goes through `Editor` methods.
 
 use super::{Number, TaggedValue, Value};
-use crate::error::{Error, Result};
+use crate::editor::{Editor, RawNodeHandle};
+use crate::error::Result;
 use crate::Document;
-use fyaml_sys::*;
-use libc::c_void;
-use std::ffi::CStr;
-use std::ptr;
 
 impl Value {
     /// Emits this value as a YAML string using libfyaml.
     ///
     /// This provides standards-compliant YAML output with proper quoting,
-    /// escaping, and formatting.
+    /// escaping, and formatting. The output does **not** include a trailing
+    /// newline — this is a value-level representation, not a document.
     ///
     /// # Example
     ///
@@ -28,53 +29,24 @@ impl Value {
     /// assert!(yaml.contains("key: value"));
     /// ```
     pub fn to_yaml_string(&self) -> Result<String> {
-        // Create a new document
-        let doc = Document::new()?;
-
-        // Convert value to libfyaml node
-        let node_ptr = self.to_fy_node(doc.as_ptr())?;
-
-        // Set as document root
-        let ret = unsafe { fy_document_set_root(doc.as_ptr(), node_ptr) };
-        if ret != 0 {
-            return Err(Error::Ffi("fy_document_set_root failed"));
+        let mut doc = Document::new()?;
+        {
+            let mut ed = doc.edit();
+            let root = self.build_node(&mut ed)?;
+            ed.set_root(root)?;
         }
-
-        // Emit to string
-        let ptr = unsafe { fy_emit_document_to_string(doc.as_ptr(), FYECF_MODE_DEJSON) };
-        if ptr.is_null() {
-            return Err(Error::Ffi("fy_emit_document_to_string returned null"));
-        }
-
-        let s = unsafe { CStr::from_ptr(ptr) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe { libc::free(ptr as *mut c_void) };
-
-        Ok(s)
+        doc.root()
+            .ok_or(crate::error::Error::Ffi("document has no root"))?
+            .emit()
     }
 
-    /// Converts this Value to a libfyaml node.
-    ///
-    /// The node is owned by the document and will be freed when the document is dropped.
-    fn to_fy_node(&self, doc_ptr: *mut fy_document) -> Result<*mut fy_node> {
+    /// Recursively builds a libfyaml node tree from this Value using the Editor API.
+    fn build_node(&self, ed: &mut Editor<'_>) -> Result<RawNodeHandle> {
         match self {
-            Value::Null => {
-                let node_ptr = unsafe { fy_node_create_scalar_copy(doc_ptr, ptr::null(), 0) };
-                if node_ptr.is_null() {
-                    return Err(Error::Ffi("fy_node_create_scalar_copy returned null"));
-                }
-                Ok(node_ptr)
-            }
+            Value::Null => ed.build_null(),
             Value::Bool(b) => {
                 let s = if *b { "true" } else { "false" };
-                let node_ptr = unsafe {
-                    fy_node_create_scalar_copy(doc_ptr, s.as_ptr() as *const i8, s.len())
-                };
-                if node_ptr.is_null() {
-                    return Err(Error::Ffi("fy_node_create_scalar_copy returned null"));
-                }
-                Ok(node_ptr)
+                ed.build_scalar(s)
             }
             Value::Number(n) => {
                 let s = match n {
@@ -94,63 +66,30 @@ impl Value {
                         }
                     }
                 };
-                let node_ptr = unsafe {
-                    fy_node_create_scalar_copy(doc_ptr, s.as_ptr() as *const i8, s.len())
-                };
-                if node_ptr.is_null() {
-                    return Err(Error::Ffi("fy_node_create_scalar_copy returned null"));
-                }
-                Ok(node_ptr)
+                ed.build_scalar(&s)
             }
-            Value::String(s) => {
-                let node_ptr = unsafe {
-                    fy_node_create_scalar_copy(doc_ptr, s.as_ptr() as *const i8, s.len())
-                };
-                if node_ptr.is_null() {
-                    return Err(Error::Ffi("fy_node_create_scalar_copy returned null"));
+            Value::String(s) => ed.build_scalar(s),
+            Value::Sequence(items) => {
+                let mut seq = ed.build_sequence()?;
+                for item in items {
+                    let child = item.build_node(ed)?;
+                    ed.seq_append(&mut seq, child)?;
                 }
-                Ok(node_ptr)
-            }
-            Value::Sequence(seq) => {
-                let seq_ptr = unsafe { fy_node_create_sequence(doc_ptr) };
-                if seq_ptr.is_null() {
-                    return Err(Error::Ffi("fy_node_create_sequence returned null"));
-                }
-                for item in seq {
-                    let item_ptr = item.to_fy_node(doc_ptr)?;
-                    let ret = unsafe { fy_node_sequence_append(seq_ptr, item_ptr) };
-                    if ret != 0 {
-                        return Err(Error::Ffi("fy_node_sequence_append failed"));
-                    }
-                }
-                Ok(seq_ptr)
+                Ok(seq)
             }
             Value::Mapping(map) => {
-                let map_ptr = unsafe { fy_node_create_mapping(doc_ptr) };
-                if map_ptr.is_null() {
-                    return Err(Error::Ffi("fy_node_create_mapping returned null"));
+                let mut m = ed.build_mapping()?;
+                for (k, v) in map {
+                    let key = k.build_node(ed)?;
+                    let val = v.build_node(ed)?;
+                    ed.map_insert(&mut m, key, val)?;
                 }
-                for (key, value) in map {
-                    let key_ptr = key.to_fy_node(doc_ptr)?;
-                    let value_ptr = value.to_fy_node(doc_ptr)?;
-                    let ret = unsafe { fy_node_mapping_append(map_ptr, key_ptr, value_ptr) };
-                    if ret != 0 {
-                        return Err(Error::Ffi("fy_node_mapping_append failed"));
-                    }
-                }
-                Ok(map_ptr)
+                Ok(m)
             }
             Value::Tagged(tagged) => {
-                // First create the inner value node
-                let value_ptr = tagged.value.to_fy_node(doc_ptr)?;
-                // Then set the tag on it
-                let tag = &tagged.tag;
-                let ret =
-                    unsafe { fy_node_set_tag(value_ptr, tag.as_ptr() as *const i8, tag.len()) };
-                if ret != 0 {
-                    return Err(Error::Ffi("fy_node_set_tag failed"));
-                }
-                Ok(value_ptr)
+                let mut node = tagged.value.build_node(ed)?;
+                ed.set_tag(&mut node, &tagged.tag)?;
+                Ok(node)
             }
         }
     }
@@ -172,7 +111,11 @@ mod tests {
     fn test_emit_null() {
         let value = Value::Null;
         let yaml = value.to_yaml_string().unwrap();
-        assert!(yaml.trim().is_empty() || yaml.contains("null") || yaml.contains("~"));
+        assert!(
+            yaml.is_empty() || yaml == "null" || yaml == "~",
+            "Null to_yaml_string() should be exact (no trailing newline), got: {:?}",
+            yaml
+        );
     }
 
     #[test]

@@ -160,8 +160,8 @@ fn emit_yaml_formatted() {
     let doc = Document::parse_str("value: \"bar: wiz\"").unwrap();
     let root = doc.root().unwrap();
     let node = root.at_path("/value").unwrap();
-    // emit() returns YAML-formatted (quoted because colon)
-    assert_eq!(node.emit().unwrap().trim(), "\"bar: wiz\"");
+    // emit() returns YAML-formatted (quoted because colon), no trailing newline
+    assert_eq!(node.emit().unwrap(), "\"bar: wiz\"");
 }
 
 // =============================================================================

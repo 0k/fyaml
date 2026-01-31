@@ -78,8 +78,7 @@ mod tests {
         "#,
             "",
         );
-        // emit() may or may not include trailing newline
-        assert!(result.trim() == "foo: bar");
+        assert_eq!(result, "foo: bar");
     }
 
     #[test]
