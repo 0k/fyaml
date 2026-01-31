@@ -76,6 +76,17 @@ pub struct RawNodeHandle {
 }
 
 impl RawNodeHandle {
+    /// Creates a detached handle from a raw pointer, returning an error if null.
+    ///
+    /// The caller must ensure `ptr` was allocated by libfyaml for this document.
+    pub(crate) fn try_from_ptr(ptr: *mut fy_node, err: &'static str) -> Result<Self> {
+        let node_ptr = NonNull::new(ptr).ok_or(Error::Ffi(err))?;
+        Ok(Self {
+            node_ptr,
+            inserted: false,
+        })
+    }
+
     /// Returns the raw node pointer.
     #[inline]
     pub(crate) fn as_ptr(&self) -> *mut fy_node {
@@ -515,11 +526,20 @@ impl<'doc> Editor<'doc> {
             // VERIFIED: Freeing here causes double-free (detected in tests).
             return Err(diag_error(diag, "fy_node_build_from_malloc_string failed"));
         }
-        // On success, libfyaml takes ownership of buffer (freed when document is destroyed)
+        // On success, libfyaml takes ownership of buffer (freed when document is destroyed).
+        // node_ptr is non-null here (null case handled above).
         Ok(RawNodeHandle {
             node_ptr: NonNull::new(node_ptr).unwrap(),
             inserted: false,
         })
+    }
+
+    /// Creates a scalar node from raw pointer and length.
+    ///
+    /// Pass `(ptr::null(), 0)` for YAML null (distinct from empty string `("", 0)`).
+    fn build_scalar_raw(&mut self, ptr: *const i8, len: usize) -> Result<RawNodeHandle> {
+        let node_ptr = unsafe { fy_node_create_scalar_copy(self.doc_ptr(), ptr, len) };
+        RawNodeHandle::try_from_ptr(node_ptr, "fy_node_create_scalar_copy failed")
     }
 
     /// Builds a plain scalar node.
@@ -527,37 +547,19 @@ impl<'doc> Editor<'doc> {
     /// The scalar style is automatically determined based on content.
     /// Use [`build_from_yaml`](Self::build_from_yaml) for explicit quoting.
     pub fn build_scalar(&mut self, value: &str) -> Result<RawNodeHandle> {
-        let node_ptr = unsafe {
-            fy_node_create_scalar_copy(self.doc_ptr(), value.as_ptr() as *const i8, value.len())
-        };
-        let nn = NonNull::new(node_ptr).ok_or(Error::Ffi("fy_node_create_scalar_copy failed"))?;
-        Ok(RawNodeHandle {
-            node_ptr: nn,
-
-            inserted: false,
-        })
+        self.build_scalar_raw(value.as_ptr() as *const i8, value.len())
     }
 
     /// Builds an empty sequence node.
     pub fn build_sequence(&mut self) -> Result<RawNodeHandle> {
-        let node_ptr = unsafe { fy_node_create_sequence(self.doc_ptr()) };
-        let nn = NonNull::new(node_ptr).ok_or(Error::Ffi("fy_node_create_sequence failed"))?;
-        Ok(RawNodeHandle {
-            node_ptr: nn,
-
-            inserted: false,
-        })
+        let ptr = unsafe { fy_node_create_sequence(self.doc_ptr()) };
+        RawNodeHandle::try_from_ptr(ptr, "fy_node_create_sequence failed")
     }
 
     /// Builds an empty mapping node.
     pub fn build_mapping(&mut self) -> Result<RawNodeHandle> {
-        let node_ptr = unsafe { fy_node_create_mapping(self.doc_ptr()) };
-        let nn = NonNull::new(node_ptr).ok_or(Error::Ffi("fy_node_create_mapping failed"))?;
-        Ok(RawNodeHandle {
-            node_ptr: nn,
-
-            inserted: false,
-        })
+        let ptr = unsafe { fy_node_create_mapping(self.doc_ptr()) };
+        RawNodeHandle::try_from_ptr(ptr, "fy_node_create_mapping failed")
     }
 
     /// Sets the document root to the given node.
@@ -583,13 +585,8 @@ impl<'doc> Editor<'doc> {
     ///
     /// Returns a handle to the copied node that can be inserted.
     pub fn copy_node(&mut self, source: NodeRef<'_>) -> Result<RawNodeHandle> {
-        let node_ptr = unsafe { fy_node_copy(self.doc_ptr(), source.as_ptr()) };
-        let nn = NonNull::new(node_ptr).ok_or(Error::Ffi("fy_node_copy failed"))?;
-        Ok(RawNodeHandle {
-            node_ptr: nn,
-
-            inserted: false,
-        })
+        let ptr = unsafe { fy_node_copy(self.doc_ptr(), source.as_ptr()) };
+        RawNodeHandle::try_from_ptr(ptr, "fy_node_copy failed")
     }
 
     // ==================== Handle-Level Node Assembly ====================
@@ -598,6 +595,12 @@ impl<'doc> Editor<'doc> {
     ///
     /// The `item` handle is consumed (the sequence takes ownership).
     /// The `seq` handle must have been created with [`build_sequence`](Self::build_sequence).
+    ///
+    /// # Safety contract
+    ///
+    /// libfyaml's `fy_node_sequence_append` validates preconditions (type, attachment,
+    /// document match) before linking. On error, the node is not consumed — ownership
+    /// remains with the caller (verified in libfyaml source: `fy-doc.c`).
     pub fn seq_append(&mut self, seq: &mut RawNodeHandle, mut item: RawNodeHandle) -> Result<()> {
         let ret = unsafe { fy_node_sequence_append(seq.as_ptr(), item.as_ptr()) };
         if ret != 0 {
@@ -611,6 +614,12 @@ impl<'doc> Editor<'doc> {
     ///
     /// Both `key` and `value` handles are consumed (the mapping takes ownership).
     /// The `map` handle must have been created with [`build_mapping`](Self::build_mapping).
+    ///
+    /// # Safety contract
+    ///
+    /// libfyaml's `fy_node_mapping_append` validates preconditions (type, attachment,
+    /// document match, duplicate keys) before linking. On error, neither key nor value
+    /// is consumed — ownership remains with the caller (verified in libfyaml source: `fy-doc.c`).
     pub fn map_insert(
         &mut self,
         map: &mut RawNodeHandle,
@@ -639,14 +648,13 @@ impl<'doc> Editor<'doc> {
 
     /// Builds a null scalar node.
     ///
-    /// Emits as `null`, `~`, or empty depending on the emitter mode.
+    /// Uses `build_from_yaml` internally because libfyaml's
+    /// `fy_node_create_scalar_copy(doc, NULL, 0)` produces an empty scalar
+    /// without the `is_null` flag that the parser sets. Going through the
+    /// parser ensures `fy_node_is_null()` returns true and the emitter
+    /// produces `null` instead of empty string.
     pub fn build_null(&mut self) -> Result<RawNodeHandle> {
-        let node_ptr = unsafe { fy_node_create_scalar_copy(self.doc_ptr(), ptr::null(), 0) };
-        let nn = NonNull::new(node_ptr).ok_or(Error::Ffi("fy_node_create_scalar_copy failed"))?;
-        Ok(RawNodeHandle {
-            node_ptr: nn,
-            inserted: false,
-        })
+        self.build_from_yaml("null")
     }
 
     // ==================== Path-Based Sequence Operations ====================
@@ -947,6 +955,9 @@ mod tests {
 
     #[test]
     fn test_build_null() {
+        // Note: build_null() creates a zero-length scalar via NULL ptr.
+        // libfyaml does NOT distinguish this from build_scalar("") — both
+        // emit as empty string. For YAML null semantics, use build_scalar("null").
         let mut doc = Document::new().unwrap();
         {
             let mut ed = doc.edit();
@@ -956,7 +967,6 @@ mod tests {
         let root = doc.root().unwrap();
         assert!(root.is_scalar());
         let emitted = root.emit().unwrap();
-        // libfyaml emits null scalars as empty string or "null"
         assert!(emitted.is_empty() || emitted == "null");
     }
 }
