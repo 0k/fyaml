@@ -591,6 +591,7 @@ assert!(value.is_scalar());
 | ~ed.seq_append(seq, item)~    | Append item to detached sequence handle   |
 | ~ed.map_insert(map, key, val)~ | Insert key-value pair into detached mapping |
 | ~ed.set_tag(node, tag)~       | Set YAML tag on detached node             |
+| ~ed.set_style(node, style)~   | Set YAML style on detached node, returns actual style |
 | ~ed.seq_append_at(path, item)~ | Append item to sequence at path          |
 | ~ed.root()~                   | Read root during edit session             |
 | ~ed.at_path(path)~            | Navigate during edit session              |

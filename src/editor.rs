@@ -635,6 +635,33 @@ impl<'doc> Editor<'doc> {
         Ok(())
     }
 
+    /// Sets the style of a detached node handle.
+    ///
+    /// libfyaml validates the requested style against the node content.
+    /// If the style is not valid for this content (e.g., plain for a scalar
+    /// that would be ambiguous), libfyaml may keep the current style.
+    ///
+    /// Returns the style that was actually set.
+    pub fn set_style(
+        &mut self,
+        node: &mut RawNodeHandle,
+        style: crate::node::NodeStyle,
+    ) -> crate::node::NodeStyle {
+        let raw_style = match style {
+            crate::node::NodeStyle::Any => FYNS_ANY,
+            crate::node::NodeStyle::Flow => FYNS_FLOW,
+            crate::node::NodeStyle::Block => FYNS_BLOCK,
+            crate::node::NodeStyle::Plain => FYNS_PLAIN,
+            crate::node::NodeStyle::SingleQuoted => FYNS_SINGLE_QUOTED,
+            crate::node::NodeStyle::DoubleQuoted => FYNS_DOUBLE_QUOTED,
+            crate::node::NodeStyle::Literal => FYNS_LITERAL,
+            crate::node::NodeStyle::Folded => FYNS_FOLDED,
+            crate::node::NodeStyle::Alias => FYNS_ALIAS,
+        };
+        let result = unsafe { fy_node_set_style(node.as_ptr(), raw_style) };
+        crate::node::NodeStyle::from(result)
+    }
+
     /// Sets a YAML tag on a detached node handle.
     ///
     /// For example, `set_tag(&mut node, "!custom")` produces `!custom value`.
