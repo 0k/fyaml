@@ -68,7 +68,15 @@ impl Value {
                 };
                 ed.build_scalar(&s)
             }
-            Value::String(s) => ed.build_scalar(s),
+            Value::String(s) => {
+                if crate::scalar_parse::needs_quoting(s) {
+                    let mut node = ed.build_scalar(s)?;
+                    ed.set_style(&mut node, crate::node::NodeStyle::SingleQuoted);
+                    Ok(node)
+                } else {
+                    ed.build_scalar(s)
+                }
+            }
             Value::Sequence(items) => {
                 let mut seq = ed.build_sequence()?;
                 for item in items {
@@ -141,6 +149,88 @@ mod tests {
         let value = Value::String("hello world".into());
         let yaml = value.to_yaml_string().unwrap();
         assert!(yaml.contains("hello world"));
+    }
+
+    #[test]
+    fn test_emit_string_ambiguous_bool() {
+        assert_eq!(
+            Value::String("true".into()).to_yaml_string().unwrap(),
+            "'true'"
+        );
+        assert_eq!(
+            Value::String("false".into()).to_yaml_string().unwrap(),
+            "'false'"
+        );
+        assert_eq!(
+            Value::String("yes".into()).to_yaml_string().unwrap(),
+            "'yes'"
+        );
+        assert_eq!(Value::String("no".into()).to_yaml_string().unwrap(), "'no'");
+        assert_eq!(Value::String("on".into()).to_yaml_string().unwrap(), "'on'");
+        assert_eq!(
+            Value::String("off".into()).to_yaml_string().unwrap(),
+            "'off'"
+        );
+        assert_eq!(
+            Value::String("True".into()).to_yaml_string().unwrap(),
+            "'True'"
+        );
+        assert_eq!(
+            Value::String("FALSE".into()).to_yaml_string().unwrap(),
+            "'FALSE'"
+        );
+    }
+
+    #[test]
+    fn test_emit_string_ambiguous_null() {
+        assert_eq!(
+            Value::String("null".into()).to_yaml_string().unwrap(),
+            "'null'"
+        );
+        assert_eq!(Value::String("~".into()).to_yaml_string().unwrap(), "'~'");
+        assert_eq!(
+            Value::String("Null".into()).to_yaml_string().unwrap(),
+            "'Null'"
+        );
+        assert_eq!(
+            Value::String("NULL".into()).to_yaml_string().unwrap(),
+            "'NULL'"
+        );
+    }
+
+    #[test]
+    fn test_emit_string_ambiguous_number() {
+        assert_eq!(Value::String("42".into()).to_yaml_string().unwrap(), "'42'");
+        assert_eq!(
+            Value::String("3.14".into()).to_yaml_string().unwrap(),
+            "'3.14'"
+        );
+        assert_eq!(
+            Value::String("0xFF".into()).to_yaml_string().unwrap(),
+            "'0xFF'"
+        );
+        assert_eq!(
+            Value::String(".inf".into()).to_yaml_string().unwrap(),
+            "'.inf'"
+        );
+        assert_eq!(
+            Value::String(".nan".into()).to_yaml_string().unwrap(),
+            "'.nan'"
+        );
+    }
+
+    #[test]
+    fn test_emit_string_not_ambiguous() {
+        assert_eq!(
+            Value::String("hello".into()).to_yaml_string().unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            Value::String("hello world".into())
+                .to_yaml_string()
+                .unwrap(),
+            "hello world"
+        );
     }
 
     #[test]

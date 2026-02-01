@@ -117,6 +117,16 @@ pub fn parse_f64(s: &str) -> Option<f64> {
     s.parse().ok()
 }
 
+/// Checks if a plain scalar string would be ambiguous with another YAML type.
+///
+/// Returns `true` if the string content, when emitted as a plain scalar,
+/// could be misinterpreted as null, boolean, or numeric. Such strings
+/// need quoting to roundtrip correctly as `Value::String`.
+#[inline]
+pub fn needs_quoting(s: &str) -> bool {
+    is_null(s) || parse_bool(s).is_some() || parse_number(s).is_some()
+}
+
 /// Parses a plain scalar as a Number (for Value type inference).
 ///
 /// Tries i64 first, then u64, then f64 (only if contains `.` or exponent).
