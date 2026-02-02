@@ -649,9 +649,9 @@ assert!(value.is_scalar());
 
 | Metric    | Coverage |
 |-----------+----------|
-| Lines     |   88.44% |
-| Functions |   91.29% |
-| Regions   |   90.44% |
+| Lines     |   89.05% |
+| Functions |   91.83% |
+| Regions   |   91.22% |
 
 ** Other Rust YAML Libraries
 
