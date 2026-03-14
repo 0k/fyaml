@@ -289,9 +289,40 @@ impl<'doc> Editor<'doc> {
     /// assert_eq!(doc.at_path("/items/2").unwrap().scalar_str().unwrap(), "last");
     /// ```
     pub fn set_yaml_at(&mut self, path: &str, yaml: &str) -> Result<()> {
-        // Build the new node
-        let mut new_node = self.build_from_yaml(yaml)?;
+        let new_node = self.build_from_yaml(yaml)?;
+        self.set_node_at(path, new_node)
+    }
 
+    /// Sets a scalar value at the given path without YAML parsing.
+    ///
+    /// Unlike [`set_yaml_at`](Self::set_yaml_at), this method does **not** parse the
+    /// value as a YAML snippet. It creates a plain scalar node directly from the raw
+    /// string bytes. This is the correct choice when the value is known to be a scalar
+    /// (e.g., an expression string or identifier) and may contain characters like `:`
+    /// that would confuse the YAML parser.
+    ///
+    /// Behaves identically to `set_yaml_at` for path resolution and node replacement.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fyaml::Document;
+    ///
+    /// let mut doc = Document::parse_str("run: echo hello").unwrap();
+    /// {
+    ///     let mut ed = doc.edit();
+    ///     // This value contains ':' which would fail with set_yaml_at
+    ///     ed.set_scalar_at("/run", "echo hello: world").unwrap();
+    /// }
+    /// assert_eq!(doc.at_path("/run").unwrap().scalar_str().unwrap(), "echo hello: world");
+    /// ```
+    pub fn set_scalar_at(&mut self, path: &str, value: &str) -> Result<()> {
+        let new_node = self.build_scalar(value)?;
+        self.set_node_at(path, new_node)
+    }
+
+    /// Shared implementation for `set_yaml_at` and `set_scalar_at`.
+    fn set_node_at(&mut self, path: &str, mut new_node: RawNodeHandle) -> Result<()> {
         // Find the parent path and key
         if path.is_empty() || path == "/" {
             // Setting the root
@@ -398,6 +429,94 @@ impl<'doc> Editor<'doc> {
 
         // Mark as inserted so Drop doesn't free it
         new_node.mark_inserted();
+        Ok(())
+    }
+
+    /// Renames a mapping key at the given path, preserving the value and ordering.
+    ///
+    /// The `path` must point to an existing key in a mapping (e.g., `/jobs/old-name`).
+    /// The last component of `path` is the old key, which will be replaced by `new_key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The path doesn't exist or the parent is not a mapping
+    /// - A key with `new_key` already exists in the same mapping
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fyaml::Document;
+    ///
+    /// let mut doc = Document::parse_str("old-name: value").unwrap();
+    /// {
+    ///     let mut ed = doc.edit();
+    ///     ed.rename_key_at("/old-name", "new_name").unwrap();
+    /// }
+    /// assert!(doc.at_path("/old-name").is_none());
+    /// assert_eq!(doc.at_path("/new_name").unwrap().scalar_str().unwrap(), "value");
+    /// ```
+    pub fn rename_key_at(&mut self, path: &str, new_key: &str) -> Result<()> {
+        if path.is_empty() || path == "/" {
+            return Err(Error::Ffi("cannot rename root"));
+        }
+
+        let (parent_path, old_key) = split_path(path);
+        let parent_ptr = self.resolve_parent(parent_path)?;
+
+        let parent_type = unsafe { fy_node_get_type(parent_ptr) };
+        if parent_type != FYNT_MAPPING {
+            return Err(Error::TypeMismatch {
+                expected: "mapping",
+                got: "non-mapping",
+            });
+        }
+
+        // Check that old key exists
+        let pair_ptr = unsafe {
+            fy_node_mapping_lookup_pair_by_string(
+                parent_ptr,
+                old_key.as_ptr() as *const i8,
+                old_key.len(),
+            )
+        };
+        if pair_ptr.is_null() {
+            return Err(Error::Ffi("key not found"));
+        }
+
+        // Check that new key doesn't already exist (unless it's the same key)
+        if old_key != new_key {
+            let existing = unsafe {
+                fy_node_mapping_lookup_pair_by_string(
+                    parent_ptr,
+                    new_key.as_ptr() as *const i8,
+                    new_key.len(),
+                )
+            };
+            if !existing.is_null() {
+                return Err(Error::Ffi("duplicate key"));
+            }
+        }
+
+        // Create new key scalar
+        let new_key_node = unsafe {
+            fy_node_create_scalar_copy(
+                self.doc_ptr(),
+                new_key.as_ptr() as *const i8,
+                new_key.len(),
+            )
+        };
+        if new_key_node.is_null() {
+            return Err(Error::Ffi("fy_node_create_scalar_copy failed"));
+        }
+
+        // Replace the key in-place (frees old key, preserves ordering)
+        let ret = unsafe { fy_node_pair_set_key(pair_ptr, new_key_node) };
+        if ret != 0 {
+            unsafe { fy_node_free(new_key_node) };
+            return Err(Error::Ffi("fy_node_pair_set_key failed"));
+        }
+
         Ok(())
     }
 
@@ -995,5 +1114,135 @@ mod tests {
         assert!(root.is_scalar());
         let emitted = root.emit().unwrap();
         assert!(emitted.is_empty() || emitted == "null");
+    }
+
+    #[test]
+    fn test_rename_key_at_simple() {
+        let mut doc = Document::parse_str("old-name: value").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.rename_key_at("/old-name", "new_name").unwrap();
+        }
+        assert!(doc.at_path("/old-name").is_none());
+        assert_eq!(
+            doc.at_path("/new_name").unwrap().scalar_str().unwrap(),
+            "value"
+        );
+    }
+
+    #[test]
+    fn test_rename_key_at_preserves_value() {
+        let mut doc =
+            Document::parse_str("parent:\n  old-key:\n    nested: data\n    list:\n      - a")
+                .unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.rename_key_at("/parent/old-key", "new_key").unwrap();
+        }
+        assert!(doc.at_path("/parent/old-key").is_none());
+        assert_eq!(
+            doc.at_path("/parent/new_key/nested")
+                .unwrap()
+                .scalar_str()
+                .unwrap(),
+            "data"
+        );
+    }
+
+    #[test]
+    fn test_rename_key_at_nonexistent() {
+        let mut doc = Document::parse_str("name: Alice").unwrap();
+        {
+            let mut ed = doc.edit();
+            let result = ed.rename_key_at("/nonexistent", "new");
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_rename_key_at_duplicate() {
+        let mut doc = Document::parse_str("a: 1\nb: 2").unwrap();
+        {
+            let mut ed = doc.edit();
+            let result = ed.rename_key_at("/a", "b");
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn test_rename_key_at_preserves_order() {
+        let mut doc = Document::parse_str("first: 1\nmiddle: 2\nlast: 3").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.rename_key_at("/middle", "renamed").unwrap();
+        }
+        let keys: Vec<&str> = doc
+            .root()
+            .unwrap()
+            .map_iter()
+            .map(|(k, _)| k.scalar_str().unwrap())
+            .collect();
+        assert_eq!(keys, vec!["first", "renamed", "last"]);
+    }
+
+    #[test]
+    fn test_set_scalar_at_replace() {
+        let mut doc = Document::parse_str("name: Alice").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_scalar_at("/name", "Bob").unwrap();
+        }
+        assert_eq!(doc.at_path("/name").unwrap().scalar_str().unwrap(), "Bob");
+    }
+
+    #[test]
+    fn test_set_scalar_at_with_colons() {
+        let mut doc = Document::parse_str("run: echo hello").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_scalar_at("/run", "echo hello: world").unwrap();
+        }
+        assert_eq!(
+            doc.at_path("/run").unwrap().scalar_str().unwrap(),
+            "echo hello: world"
+        );
+    }
+
+    #[test]
+    fn test_set_scalar_at_multiline_with_colons() {
+        let mut doc =
+            Document::parse_str("run: |\n  echo start").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_scalar_at("/run", "echo step1\nif [ $x: -eq 0 ]; then\n  echo done\nfi")
+                .unwrap();
+        }
+        let val = doc.at_path("/run").unwrap().scalar_str().unwrap();
+        assert!(val.contains(": -eq"), "expected colon preserved in: {val}");
+        assert!(val.contains("echo step1"), "expected content preserved in: {val}");
+    }
+
+    #[test]
+    fn test_set_scalar_at_new_key() {
+        let mut doc = Document::parse_str("name: Alice").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_scalar_at("/age", "30").unwrap();
+        }
+        assert_eq!(doc.at_path("/age").unwrap().scalar_str().unwrap(), "30");
+    }
+
+    #[test]
+    fn test_set_scalar_at_sequence() {
+        let mut doc = Document::parse_str("items:\n  - a\n  - b").unwrap();
+        {
+            let mut ed = doc.edit();
+            ed.set_scalar_at("/items/0", "replaced").unwrap();
+        }
+        assert_eq!(
+            doc.at_path("/items/0").unwrap().scalar_str().unwrap(),
+            "replaced"
+        );
+        assert_eq!(doc.at_path("/items/1").unwrap().scalar_str().unwrap(), "b");
     }
 }
