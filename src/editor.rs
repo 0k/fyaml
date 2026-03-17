@@ -7,6 +7,7 @@ use crate::ffi_util::malloc_copy;
 use crate::node_ref::NodeRef;
 use fyaml_sys::*;
 
+use libc::c_char;
 use std::ptr::{self, NonNull};
 
 // =============================================================================
@@ -231,7 +232,7 @@ impl<'doc> Editor<'doc> {
             let parent_ptr = unsafe {
                 fy_node_by_path(
                     root_ptr,
-                    parent_path.as_ptr() as *const i8,
+                    parent_path.as_ptr() as *const c_char,
                     parent_path.len(),
                     0,
                 )
@@ -315,7 +316,7 @@ impl<'doc> Editor<'doc> {
             let pair_ptr = unsafe {
                 fy_node_mapping_lookup_pair_by_string(
                     parent_ptr,
-                    key.as_ptr() as *const i8,
+                    key.as_ptr() as *const c_char,
                     key.len(),
                 )
             };
@@ -329,7 +330,7 @@ impl<'doc> Editor<'doc> {
             } else {
                 // Create new key and append
                 let key_ptr = unsafe {
-                    fy_node_create_scalar_copy(self.doc_ptr(), key.as_ptr() as *const i8, key.len())
+                    fy_node_create_scalar_copy(self.doc_ptr(), key.as_ptr() as *const c_char, key.len())
                 };
                 if key_ptr.is_null() {
                     return Err(Error::Ffi("fy_node_create_scalar_copy failed"));
@@ -438,7 +439,7 @@ impl<'doc> Editor<'doc> {
             let pair_ptr = unsafe {
                 fy_node_mapping_lookup_pair_by_string(
                     parent_ptr,
-                    key.as_ptr() as *const i8,
+                    key.as_ptr() as *const c_char,
                     key.len(),
                 )
             };
@@ -547,7 +548,7 @@ impl<'doc> Editor<'doc> {
     /// The scalar style is automatically determined based on content.
     /// Use [`build_from_yaml`](Self::build_from_yaml) for explicit quoting.
     pub fn build_scalar(&mut self, value: &str) -> Result<RawNodeHandle> {
-        self.build_scalar_raw(value.as_ptr() as *const i8, value.len())
+        self.build_scalar_raw(value.as_ptr() as *const c_char, value.len())
     }
 
     /// Builds an empty sequence node.
@@ -666,7 +667,7 @@ impl<'doc> Editor<'doc> {
     ///
     /// For example, `set_tag(&mut node, "!custom")` produces `!custom value`.
     pub fn set_tag(&mut self, node: &mut RawNodeHandle, tag: &str) -> Result<()> {
-        let ret = unsafe { fy_node_set_tag(node.as_ptr(), tag.as_ptr() as *const i8, tag.len()) };
+        let ret = unsafe { fy_node_set_tag(node.as_ptr(), tag.as_ptr() as *const c_char, tag.len()) };
         if ret != 0 {
             return Err(Error::Ffi("fy_node_set_tag failed"));
         }
@@ -718,7 +719,7 @@ impl<'doc> Editor<'doc> {
             return Ok(root_ptr);
         }
         let node_ptr =
-            unsafe { fy_node_by_path(root_ptr, path.as_ptr() as *const i8, path.len(), 0) };
+            unsafe { fy_node_by_path(root_ptr, path.as_ptr() as *const c_char, path.len(), 0) };
         if node_ptr.is_null() {
             return Err(Error::Ffi("path not found"));
         }

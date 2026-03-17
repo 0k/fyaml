@@ -172,7 +172,7 @@ impl FyParser {
             return Err(Error::Io("dup(stdin) failed"));
         }
 
-        let fp = unsafe { libc::fdopen(dup_fd, b"r\0".as_ptr() as *const i8) };
+        let fp = unsafe { libc::fdopen(dup_fd, b"r\0".as_ptr() as *const libc::c_char) };
         if fp.is_null() {
             unsafe { libc::close(dup_fd) };
             return Err(Error::Io("fdopen failed"));
@@ -187,7 +187,7 @@ impl FyParser {
         }
 
         let ret = unsafe {
-            fy_parser_set_input_fp(parser.inner.as_ptr(), b"stdin\0".as_ptr() as *const i8, fp)
+            fy_parser_set_input_fp(parser.inner.as_ptr(), b"stdin\0".as_ptr() as *const libc::c_char, fp)
         };
         if ret != 0 {
             unsafe { libc::fclose(fp) };

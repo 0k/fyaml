@@ -232,7 +232,7 @@ impl Document {
         // SAFETY: fy_document_build_from_string borrows the input - the String must
         // remain valid for the document's lifetime. We keep it in InputOwnership::OwnedString.
         let doc_ptr =
-            unsafe { fy_document_build_from_string(&cfg, s.as_ptr() as *const i8, s.len()) };
+            unsafe { fy_document_build_from_string(&cfg, s.as_ptr() as *const libc::c_char, s.len()) };
         if doc_ptr.is_null() {
             return Err(diag_error(diag, "fy_document_build_from_string failed"));
         }
@@ -289,7 +289,7 @@ impl Document {
         // SAFETY: fy_document_build_from_string borrows the input - the Vec must
         // remain valid for the document's lifetime. We keep it in InputOwnership::OwnedBytes.
         let doc_ptr = unsafe {
-            fy_document_build_from_string(&cfg, bytes.as_ptr() as *const i8, bytes.len())
+            fy_document_build_from_string(&cfg, bytes.as_ptr() as *const libc::c_char, bytes.len())
         };
         if doc_ptr.is_null() {
             return Err(diag_error(diag, "fy_document_build_from_string failed"));

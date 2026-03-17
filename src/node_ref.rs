@@ -260,7 +260,7 @@ impl<'doc> NodeRef<'doc> {
     /// ```
     pub fn at_path(&self, path: &str) -> Option<NodeRef<'doc>> {
         let node_ptr =
-            unsafe { fy_node_by_path(self.as_ptr(), path.as_ptr() as *const i8, path.len(), 0) };
+            unsafe { fy_node_by_path(self.as_ptr(), path.as_ptr() as *const libc::c_char, path.len(), 0) };
         NonNull::new(node_ptr).map(|nn| NodeRef::new(nn, self.doc))
     }
 
@@ -344,7 +344,7 @@ impl<'doc> NodeRef<'doc> {
             return None;
         }
         let node_ptr = unsafe {
-            fy_node_mapping_lookup_by_string(self.as_ptr(), key.as_ptr() as *const i8, key.len())
+            fy_node_mapping_lookup_by_string(self.as_ptr(), key.as_ptr() as *const libc::c_char, key.len())
         };
         NonNull::new(node_ptr).map(|nn| NodeRef::new(nn, self.doc))
     }
