@@ -518,4 +518,22 @@ mod tests {
         assert!(yaml.contains("foo"));
         assert!(yaml.contains("bar"));
     }
+
+    /// Regression: a block scalar (`|`) followed by a comment must not have the
+    /// comment fused onto its last content line on emit.
+    ///
+    /// With `FYPCF_KEEP_COMMENTS` + `FYECF_OUTPUT_COMMENTS` enabled, the
+    /// parse->emit round-trip of `k: |\n    hi\n## cmt\n` wrongly produces
+    /// `k: |\n  hi## cmt\n` ("## cmt" glued to "hi") instead of keeping the
+    /// comment on its own line. A plain scalar in the same position is fine,
+    /// so this is specific to block scalars.
+    #[test]
+    fn test_emit_block_scalar_does_not_fuse_trailing_comment() {
+        let doc = Document::parse_str("k: |\n    hi\n## cmt\n").unwrap();
+        let emitted = doc.emit().unwrap();
+        assert!(
+            !emitted.contains("hi## cmt"),
+            "comment fused onto block scalar content:\n{emitted}"
+        );
+    }
 }
