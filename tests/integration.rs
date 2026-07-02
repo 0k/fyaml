@@ -1760,6 +1760,34 @@ age: 30
     );
 }
 
+/// Regression test for the libfyaml finite-width emitter bug: wrapping a
+/// long single-quoted scalar inserts a `\` line-continuation, which is a
+/// LITERAL character in single-quoted style, corrupting the round-trip.
+///
+/// Worked around by `FYECF_WIDTH_INF` in `config::emit_flags()` — see the
+/// "Upstream bug workaround" comment there. If this test starts passing
+/// with the workaround removed (after a libfyaml upgrade), drop
+/// `FYECF_WIDTH_INF`.
+#[test]
+fn emit_long_single_quoted_scalar_round_trips() {
+    // 81 chars: one past the default 80-column wrap width.
+    let value = "x".repeat(81);
+    let yaml = format!("key: '{}'\n", value);
+
+    let doc = Document::parse_str(&yaml).unwrap();
+    let emitted = doc.emit().unwrap();
+
+    let doc2 = Document::parse_str(&emitted).unwrap();
+    let root = doc2.root().unwrap();
+    let reparsed = root.at_path("/key").unwrap();
+    assert_eq!(
+        reparsed.scalar_str().unwrap(),
+        value,
+        "emitted YAML must round-trip; got corrupted value from:\n{}",
+        emitted
+    );
+}
+
 // =============================================================================
 // Destructor Stress Tests
 // =============================================================================
